@@ -18,3 +18,6 @@ dados/
 
 # Boletos baixados para checagem de factoring (dados sensíveis do financeiro)
 anexos_baixados/
+
+# Link com o token secreto do modo "somente visualização" - não pode vazar
+LINK_VISUALIZACAO.txt

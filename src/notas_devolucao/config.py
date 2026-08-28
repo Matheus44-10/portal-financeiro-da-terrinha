@@ -23,6 +23,7 @@ class Configuracao:
     auth_usuario: str
     auth_senha_hash: str
     antecipacao_planilha_path: Path | None = None
+    visualizacao_token: str | None = None
 
 
 def carregar_configuracao(caminho: Path = CONFIG_PATH) -> Configuracao:
@@ -43,4 +44,5 @@ def carregar_configuracao(caminho: Path = CONFIG_PATH) -> Configuracao:
         auth_usuario=dados["auth"]["usuario"],
         auth_senha_hash=dados["auth"]["senha_hash"],
         antecipacao_planilha_path=Path(caminho_planilha_antecipacao) if caminho_planilha_antecipacao else None,
+        visualizacao_token=dados.get("visualizacao", {}).get("token") or None,
     )

@@ -21,6 +21,16 @@ nomes = ["2JM", "OKKER", "TERRAFEC", "TERRINHA", "FFAMM", "MASTER", "SAVE"]
 usuario = "usuario_exemplo"
 senha_hash = "coloque_aqui_o_hash_sha256_da_senha"
 
+[visualizacao]
+# Token secreto pra gerar um link de "somente visualização" do portal inteiro (todas as páginas),
+# sem exigir login e sem mostrar nenhum botão que altera dado (atualizar Bluesoft, vínculos,
+# e-mail de cobrança, correções de factoring etc.) - pense nisso como um link "tipo Power BI": quem
+# abre só vê o que já foi sincronizado, sem poder mexer em nada. Deixe em branco (ou remova a linha)
+# pra desativar esse recurso. Para gerar um token novo:
+# python -c "import secrets; print(secrets.token_urlsafe(24))"
+# O link fica: http://<ip-desta-máquina>:8501/<pagina>?chave=SEU_TOKEN
+token = ""
+
 [antecipacao]
 # Planilha externa (mantida manualmente pelo financeiro) com os descontos ganhos por antecipar
 # pagamento a fornecedores. O portal só lê esse arquivo (aba "report") - opcional, se não

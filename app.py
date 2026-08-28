@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import io
 import re
 import sys
@@ -486,8 +487,27 @@ config = carregar_configuracao()
 # (não mexe no Bluesoft nem grava nada), então dá pra compartilhar o link com alguém da mesma rede
 # sem senha. Todas as outras páginas continuam exigindo login normalmente.
 _caminho_pagina_atual = urlparse(st.context.url).path.strip("/").lower()
-if _caminho_pagina_atual != "antecipacao":
+
+# Link de "somente visualização" (tipo relatório publicado do Power BI) - qualquer página com
+# ?chave=<token> na URL pula o login e entra em modo leitura: continua vendo os dados normalmente,
+# mas todo botão/formulário que altera algo (sync com Bluesoft, vínculos, e-mail de cobrança,
+# correções de factoring etc.) fica escondido. Configurado em `config/settings.toml [visualizacao]`
+# - vazio/ausente desativa esse acesso.
+# Uma vez validado, fica só em `session_state` (não reavalia toda hora a partir da URL) porque os
+# links do menu lateral do st.navigation trocam de página sem manter o "?chave=" na URL - sem isso,
+# o visitante caía de volta na tela de login ao clicar em qualquer página do menu.
+_chave_url = st.query_params.get("chave")
+_chave_valida = bool(
+    config.visualizacao_token and _chave_url and hmac.compare_digest(_chave_url, config.visualizacao_token)
+)
+st.session_state["modo_leitura"] = st.session_state.get("modo_leitura", False) or _chave_valida
+
+if _caminho_pagina_atual != "antecipacao" and not st.session_state["modo_leitura"]:
     exigir_login(config)
+
+
+def _modo_leitura() -> bool:
+    return bool(st.session_state.get("modo_leitura"))
 
 
 def _barra_lateral_atualizar_dados():
@@ -499,6 +519,8 @@ def _barra_lateral_atualizar_dados():
         ultima_atualizacao = storage.carregar_ultima_atualizacao()
         if ultima_atualizacao:
             st.caption(f"🕓 Última atualização: {ultima_atualizacao.strftime('%d/%m/%Y às %H:%M')}")
+        if _modo_leitura():
+            return
         if st.button(
             "Atualizar dados do Bluesoft",
             icon=":material/sync:",
@@ -893,36 +915,40 @@ def pagina_fornecedores():
                 st.dataframe(_tabela_notas_vinculadas(notas_vinculadas_grupo), hide_index=True, width='stretch')
 
             if notas_pendentes_grupo:
-                st.markdown("**E-mail do responsável**")
-                col_email, col_email_salvar = st.columns([4, 1])
                 email_atual = emails_fornecedor.get(cnpj, "")
-                novo_email = col_email.text_input(
-                    "E-mail do responsável",
-                    value=email_atual,
-                    key=f"email_input_{cnpj}",
-                    label_visibility="collapsed",
-                    placeholder="responsavel@fornecedor.com.br",
-                )
-                if col_email_salvar.button("Salvar e-mail", key=f"salvar_email_{cnpj}", width="stretch"):
-                    if novo_email.strip() and "@" not in novo_email:
-                        st.error("Informe um e-mail válido.")
-                    else:
-                        storage.salvar_email_fornecedor(cnpj, novo_email)
-                        st.rerun()
-
-                if st.button("Gerar e-mail de cobrança", icon=":material/mail:", key=f"email_{cnpj}"):
-                    try:
-                        abrir_no_outlook(
-                            grupo["nome"], notas_pendentes_grupo, LOGO_PATH, destinatario=email_atual or None
-                        )
-                        if email_atual:
-                            st.success(f"Rascunho aberto no Outlook já preenchido para {email_atual}.")
+                if _modo_leitura():
+                    if email_atual:
+                        st.caption(f"📧 E-mail do responsável: {email_atual}")
+                else:
+                    st.markdown("**E-mail do responsável**")
+                    col_email, col_email_salvar = st.columns([4, 1])
+                    novo_email = col_email.text_input(
+                        "E-mail do responsável",
+                        value=email_atual,
+                        key=f"email_input_{cnpj}",
+                        label_visibility="collapsed",
+                        placeholder="responsavel@fornecedor.com.br",
+                    )
+                    if col_email_salvar.button("Salvar e-mail", key=f"salvar_email_{cnpj}", width="stretch"):
+                        if novo_email.strip() and "@" not in novo_email:
+                            st.error("Informe um e-mail válido.")
                         else:
-                            st.success("Rascunho aberto no Outlook. Preencha o destinatário e envie por lá.")
-                    except Exception as erro:
-                        st.error(f"Não foi possível abrir o Outlook: {erro}")
+                            storage.salvar_email_fornecedor(cnpj, novo_email)
+                            st.rerun()
 
-            if notas_pendentes_grupo and grupo["contas"]:
+                    if st.button("Gerar e-mail de cobrança", icon=":material/mail:", key=f"email_{cnpj}"):
+                        try:
+                            abrir_no_outlook(
+                                grupo["nome"], notas_pendentes_grupo, LOGO_PATH, destinatario=email_atual or None
+                            )
+                            if email_atual:
+                                st.success(f"Rascunho aberto no Outlook já preenchido para {email_atual}.")
+                            else:
+                                st.success("Rascunho aberto no Outlook. Preencha o destinatário e envie por lá.")
+                        except Exception as erro:
+                            st.error(f"Não foi possível abrir o Outlook: {erro}")
+
+            if notas_pendentes_grupo and grupo["contas"] and not _modo_leitura():
                 st.markdown("**Registrar vínculo (abatimento)**")
                 with st.form(key=f"form_vinculo_{cnpj}"):
                     opcoes_nota = {
@@ -965,6 +991,8 @@ def pagina_fornecedores():
                         f"Devolução `{v.nota_devolucao_key}` ↔ Conta a pagar `{v.conta_pagar_key}`"
                         + (f" — {v.observacao}" if v.observacao else "")
                     )
+                    if _modo_leitura():
+                        continue
                     novo_status = col_b.selectbox(
                         "Status",
                         options=opcoes_status,
@@ -1099,7 +1127,7 @@ def pagina_factoring():
     periodo_de = col_periodo_de.date_input("De", value=primeiro_dia_mes_passado, format="DD/MM/YYYY")
     periodo_ate = col_periodo_ate.date_input("Até", value=ultimo_dia_mes_passado, format="DD/MM/YYYY")
 
-    if st.button("Verificar boletos de factoring", icon=":material/search:", type="primary"):
+    if not _modo_leitura() and st.button("Verificar boletos de factoring", icon=":material/search:", type="primary"):
         barra = st.progress(0.0, text="Buscando contas a pagar quitadas no Bluesoft...")
 
         def _progresso(indice: int, total: int) -> None:
@@ -1295,7 +1323,7 @@ def pagina_factoring():
             )
             st.dataframe(_tabela_boletos(nao_verificados), hide_index=True, width="stretch")
 
-    if boletos:
+    if boletos and not _modo_leitura():
         st.markdown("**Corrigir classificação manualmente**")
         st.caption(
             "Serve pra qualquer boleto listado acima (inclusive já marcados como Factoring ou "
@@ -1374,6 +1402,9 @@ def pagina_factoring():
                         + ", ".join(nao_processados)
                     )
 
+    if _modo_leitura():
+        return
+
     st.markdown("**Forçar reverificação de uma duplicata específica**")
     st.caption(
         "Se uma duplicata específica precisa ser checada de novo (ex.: o boleto foi trocado no "
@@ -1425,7 +1456,7 @@ def pagina_antecipacao():
         "planilha mantida pelo financeiro (não vem do Bluesoft nem passa pelo botão de sync)."
     )
 
-    if st.button("🔄 Atualizar dados da planilha", key="atualizar_antecipacao"):
+    if not _modo_leitura() and st.button("🔄 Atualizar dados da planilha", key="atualizar_antecipacao"):
         st.success("Planilha recarregada.")
 
     if not config.antecipacao_planilha_path:
@@ -1606,10 +1637,12 @@ def pagina_antecipacao():
 # Todas as páginas ficam sempre registradas aqui (o Streamlit não lida bem com a lista de páginas
 # mudando de uma execução pra outra - dá "Page not found" na primeira carga de uma URL direta tipo
 # /antecipacao). O controle de quem vê o quê é só visual (`visibility="hidden"` esconde do menu
-# lateral) - a proteção de verdade já é o `exigir_login` lá em cima, que bloqueia o acesso via URL
-# direta a qualquer página que não seja a de Antecipação pra quem não estiver logado.
-_visitante_nao_logado = not st.session_state.get("autenticado")
-_visibilidade_paginas_privadas = "hidden" if _visitante_nao_logado else "visible"
+# lateral) - a proteção de verdade já é o `exigir_login`/`chave` lá em cima, que bloqueia o acesso
+# via URL direta a qualquer página que não seja a de Antecipação pra quem não estiver logado nem
+# tiver o link de visualização. Quem entrou em modo leitura (link `?chave=`) também vê o menu
+# completo, senão ficaria preso numa página só, sem conseguir navegar pelo portal.
+_pode_ver_menu_paginas_privadas = bool(st.session_state.get("autenticado")) or _modo_leitura()
+_visibilidade_paginas_privadas = "visible" if _pode_ver_menu_paginas_privadas else "hidden"
 
 pg = st.navigation(
     [

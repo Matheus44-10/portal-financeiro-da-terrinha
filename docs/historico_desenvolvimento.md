@@ -164,6 +164,47 @@ o CNPJ cadastrado (só a raiz de 8 dígitos, pra não confundir filiais da mesma
 - Tema do AgGrid trocado de `"alpine"` (genérico) pra `"streamlit"` (herda as cores da marca).
 - Rótulo de valor padronizado em cima de toda coluna de gráfico de barras.
 
+## Controle de versão e modo "somente visualização"
+
+**GitHub (2026-08-28):** o projeto virou repositório git (`git init` + primeiro commit), hospedado
+em `https://github.com/Matheus44-10/portal-financeiro-da-terrinha` (privado). O `.gitignore` já
+existia e cobria certinho tudo que não pode ser versionado (`storage_state.json`, `config/settings.toml`,
+`dados/`, `anexos_baixados/`, `.venv/`) - conferido item a item antes do primeiro commit, mais uma
+varredura por padrão de segredo hardcoded, nada encontrado. Autor dos commits configurado localmente
+pelo usuário (`git config user.name/user.email`, nunca pelo Claude - é uma configuração de máquina).
+
+**Modo "somente visualização" tipo Power BI (2026-08-28):** o usuário queria um link pra outras
+pessoas só verem o portal (todas as páginas), sem poder mexer em nada, mantendo esta máquina como
+"central" (só ela roda sync com Bluesoft e grava dado). Implementado como uma extensão do padrão que
+já existia pra página de Antecipação (bypass de login por URL):
+- `config/settings.toml [visualizacao] token = "..."` - um token secreto (gerado com
+  `secrets.token_urlsafe(24)`). Link de acesso: `http://<ip-desta-máquina>:8501/<pagina>?chave=<token>`.
+  Token vazio/ausente desativa o recurso inteiro.
+- Ao carregar qualquer página com `?chave=` batendo o token (`hmac.compare_digest`), pula o login e
+  liga `st.session_state["modo_leitura"]`. Toda ação que grava algo (`_modo_leitura()` checado antes)
+  fica escondida: botão "Atualizar dados do Bluesoft", formulário de vínculo/e-mail do responsável,
+  botão "Gerar e-mail de cobrança" (importante: esse botão dispara automação COM do Outlook **nesta
+  máquina**, nunca no dispositivo de quem clica - teria que ficar escondido de visitante mesmo sem
+  pedido explícito), edição de status de vínculo, e toda a seção de correção manual/reverificação de
+  factoring. Dados, gráficos, downloads e filtros continuam liberados.
+- **Armadilha real encontrada:** os links do menu lateral do `st.navigation` trocam de página sem
+  manter `?chave=` na URL (viram link limpo tipo `/pagina_fornecedores`) - se `modo_leitura` fosse
+  recalculado do zero em toda execução a partir da URL, o visitante caía na tela de login ao clicar
+  em qualquer página do menu. Corrigido guardando o resultado em `session_state` com OR (`estado
+  anterior or chave válida agora`), nunca rebaixando de True pra False - mesmo padrão que
+  `autenticado` já usava.
+- **Outra armadilha:** a visibilidade do menu lateral (`visibility="hidden"`/`"visible"` nos
+  `st.Page`) checava só `session_state["autenticado"]`, então quem entrava em modo leitura via
+  `?chave=` via o menu inteiro sumir (ficava preso numa página só, sem conseguir navegar). Corrigido
+  pra checar `autenticado OU modo_leitura`.
+- **Armadilha de ambiente (não é do código, é do Windows):** rodar `streamlit run app.py` sobe um
+  processo pai + um processo filho (o filho é quem realmente escuta a porta 8501); matar só o
+  processo que está "ouvindo" a porta (`Get-NetTCPConnection ... OwningProcess`) deixa o pai órfão
+  rodando em segundo plano com o código antigo. Depois de várias reinicializações isso acumula
+  processos zumbi e pode fazer parecer que uma mudança não "pegou" (ex.: `AttributeError` num campo
+  que já existe no arquivo fonte). Solução: sempre matar TODOS os `python.exe` cujo `CommandLine`
+  contenha `streamlit run app.py` antes de subir de novo, não só o dono da porta.
+
 ## Notas operacionais importantes
 
 - **F5 vs. reiniciar o processo:** editar `app.py` só precisa de F5 na página. Editar qualquer
