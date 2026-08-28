@@ -205,6 +205,48 @@ já existia pra página de Antecipação (bypass de login por URL):
   que já existe no arquivo fonte). Solução: sempre matar TODOS os `python.exe` cujo `CommandLine`
   contenha `streamlit run app.py` antes de subir de novo, não só o dono da porta.
 
+**Publicação na nuvem tipo Power BI (2026-08-28, mesmo dia):** o link `?chave=` acima só funciona
+com o PC ligado. O usuário queria o equivalente real de um relatório *publicado* do Power BI -
+acessível de qualquer lugar, mesmo com a máquina desligada. Implementado com Streamlit Community
+Cloud (gratuito), reaproveitando o GitHub que a gente já tinha:
+
+- **App na nuvem:** `https://financeiro-daterrinha.streamlit.app`, deployado a partir do mesmo
+  repositório/branch `main`, arquivo principal `app.py`. Como o repositório é privado, o app nasce
+  privado (Streamlit Cloud herda a visibilidade do repo) - restrito por e-mail em
+  Settings → Sharing → "Only specific people can view this app" (hoje: `mara.financeiro@` e
+  `andre.magalhaes@daterrinhaalimentos.com.br`). Confirmado ao vivo: sem estar na lista, a URL
+  mostra "You do not have access" mesmo pra quem tem o link.
+- **`config.MODO_NUVEM`** (`src/notas_devolucao/config.py`): liga via variável de ambiente
+  `PORTAL_MODO_NUVEM=1`, configurada nas "Secrets" do app no Streamlit Cloud (confirmado na
+  documentação oficial que secrets de nível raiz também viram variável de ambiente de verdade, não
+  só `st.secrets`). Com isso ligado: `CONFIG_PATH` aponta pra `config/settings.cloud.toml` (versionado,
+  sem segredo nenhum - login/senha ali nunca são usados de verdade) em vez de `settings.toml`, e
+  `DB_PATH` aponta pra `dados_publicados/notas_devolucao.sqlite` (também versionado) em vez do banco
+  real local. O app inteiro fica travado em `modo_leitura=True` e pula o login por completo - não
+  existe automação de Bluesoft/Outlook possível rodando na nuvem mesmo, então não faz sentido nem
+  mostrar tela de login lá.
+- **Publicar dados** (`src/notas_devolucao/publicacao.py`, botão "☁️ Publicar para nuvem" na
+  sidebar do app local, ao lado de "Atualizar dados do Bluesoft"): copia `dados/notas_devolucao.db`
+  pra `dados_publicados/notas_devolucao.sqlite` e roda `git add` + `git commit` + `git push` (nome de
+  arquivo diferente de propósito - `.sqlite` em vez de `.db` - pra não cair nas regras `dados/` e
+  `*.db` do `.gitignore`, que são pro banco real, não pro retrato publicado). O push dispara redeploy
+  automático do Streamlit Community Cloud em ~1 minuto. É uma ação deliberada e separada do sync
+  normal (equivalente ao botão "Publicar" do Power BI Desktop) - sincronizar com o Bluesoft não
+  publica nada sozinho.
+- **`requirements.txt`:** `pywin32` (usado só por `email_cobranca.abrir_no_outlook`, importado de
+  forma lazy dentro da função) precisou virar `pywin32; sys_platform == "win32"` - sem isso o
+  `pip install` inteiro falha no Linux do Streamlit Cloud, já que esse pacote não existe pra lá.
+  Os outros pacotes (`playwright`, `pdfplumber`, `pytesseract`, `Pillow`) são cross-platform e
+  instalam normalmente mesmo sem nunca serem chamados de verdade em modo nuvem.
+- **Armadilha ao criar o app pela primeira vez:** colar só `usuario/repositorio` no campo
+  "Repository" não bastou (dava "This repository does not exist"/"This branch does not exist" mesmo
+  preenchendo Branch e Main file path certos) - funcionou usando **"Paste GitHub URL"** com a URL
+  completa apontando pro arquivo: `https://github.com/<usuario>/<repo>/blob/main/app.py`.
+- Trechos de código que só rodam em ambiente Windows local (`abrir_no_outlook`) já importavam
+  `win32com.client`/`pythoncom` **dentro da função**, não no topo do módulo - por isso importar
+  `email_cobranca` (feito no topo do `app.py`) não quebra no Linux, só chamar a função quebraria (e
+  ela nunca é chamada em modo nuvem, o botão fica escondido).
+
 ## Notas operacionais importantes
 
 - **F5 vs. reiniciar o processo:** editar `app.py` só precisa de F5 na página. Editar qualquer
