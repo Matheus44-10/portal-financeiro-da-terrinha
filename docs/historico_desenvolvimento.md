@@ -246,6 +246,12 @@ Cloud (gratuito), reaproveitando o GitHub que a gente já tinha:
   `win32com.client`/`pythoncom` **dentro da função**, não no topo do módulo - por isso importar
   `email_cobranca` (feito no topo do `app.py`) não quebra no Linux, só chamar a função quebraria (e
   ela nunca é chamada em modo nuvem, o botão fica escondido).
+- **Validado ponta a ponta com usuário real:** a Mara (`mara.financeiro@daterrinhaalimentos.com.br`)
+  tentou acessar antes de fazer login no Streamlit e caiu na tela "You do not have access" (mesma
+  mensagem que aparece pra quem não está autorizado) - resolvido orientando ela a clicar em "sign in"
+  e entrar com o e-mail exatamente igual ao cadastrado na lista de Sharing. Depois disso o acesso
+  funcionou normalmente. Vale lembrar isso é o comportamento normal (a tela de "sem acesso" aparece
+  igual tanto pra quem não está na lista quanto pra quem está mas ainda não logou).
 
 ## Notas operacionais importantes
 
