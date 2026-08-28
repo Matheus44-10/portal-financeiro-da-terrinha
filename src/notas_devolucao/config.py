@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-CONFIG_PATH = BASE_DIR / "config" / "settings.toml"
+
+# "Modo nuvem" - ligado só na instância hospedada no Streamlit Community Cloud (variável de
+# ambiente configurada lá nas "Secrets" do app, nunca localmente). Nessa instância não há Bluesoft,
+# Outlook nem login manual assistido disponíveis - o app inteiro roda travado em modo leitura, lendo
+# um retrato dos dados publicado via `notas_devolucao.publicacao.publicar_dados` (git push, que
+# dispara redeploy automático), em vez do banco local de verdade.
+MODO_NUVEM = os.environ.get("PORTAL_MODO_NUVEM") == "1"
+
+CONFIG_PATH = BASE_DIR / "config" / ("settings.cloud.toml" if MODO_NUVEM else "settings.toml")
 STORAGE_STATE_PATH = BASE_DIR / "storage_state.json"
 DADOS_DIR = BASE_DIR / "dados"
-DB_PATH = DADOS_DIR / "notas_devolucao.db"
+DB_PATH = (BASE_DIR / "dados_publicados" / "notas_devolucao.sqlite") if MODO_NUVEM else (DADOS_DIR / "notas_devolucao.db")
 ANEXOS_DIR = BASE_DIR / "anexos_baixados"
 
 BLUESOFT_BASE_URL = "https://erp.bluesoft.com.br/daterrinha"

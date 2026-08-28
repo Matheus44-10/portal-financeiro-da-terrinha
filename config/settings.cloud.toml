@@ -1,0 +1,19 @@
+# Configuração usada SÓ pela instância hospedada no Streamlit Community Cloud (MODO_NUVEM=1).
+# Ao contrário de settings.toml, este arquivo É versionado - por isso não tem nenhum segredo
+# (usuário/senha aqui nunca são usados de verdade, porque o modo nuvem pula o login por completo).
+#
+# Se você mudar o período de busca ou a lista de intercompany no settings.toml local, replique a
+# mudança aqui também (e publique de novo) para os dois ficarem consistentes.
+
+[busca]
+data_inicial = 2026-01-01
+data_final = 2026-12-31
+
+[intercompany]
+nomes = ["2JM", "OKKER", "TERRAFEC", "TERRINHA", "FFAMM", "MASTER", "SAVE"]
+
+[auth]
+# Nunca usado de verdade em modo nuvem (login é sempre pulado) - só existem pra Configuracao
+# carregar sem erro.
+usuario = "nao_usado"
+senha_hash = "nao_usado"

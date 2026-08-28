@@ -19,10 +19,11 @@ from st_aggrid.shared import JsCode
 
 from notas_devolucao import storage
 from notas_devolucao.antecipacao import Antecipacao, carregar_antecipacoes
-from notas_devolucao.config import carregar_configuracao
+from notas_devolucao.config import BASE_DIR, MODO_NUVEM, carregar_configuracao
 from notas_devolucao.email_cobranca import abrir_no_outlook
 from notas_devolucao.login import exigir_login
 from notas_devolucao.models import BoletoFactoring, ContaPagar, NotaDevolucao, Vinculo
+from notas_devolucao.publicacao import publicar_dados
 from notas_devolucao.relatorio_abatimento import NotaQuitada
 from notas_devolucao.sincronizacao import atualizar_dados, verificar_boletos_factoring
 
@@ -500,9 +501,12 @@ _chave_url = st.query_params.get("chave")
 _chave_valida = bool(
     config.visualizacao_token and _chave_url and hmac.compare_digest(_chave_url, config.visualizacao_token)
 )
-st.session_state["modo_leitura"] = st.session_state.get("modo_leitura", False) or _chave_valida
+st.session_state["modo_leitura"] = MODO_NUVEM or st.session_state.get("modo_leitura", False) or _chave_valida
 
-if _caminho_pagina_atual != "antecipacao" and not st.session_state["modo_leitura"]:
+# No modo nuvem (instância pública no Streamlit Community Cloud) não existe login nenhum - o
+# acesso é controlado lá fora, pelo próprio Streamlit Community Cloud (app privado + lista de
+# e-mails convidados), não por usuário/senha deste app.
+if not MODO_NUVEM and _caminho_pagina_atual != "antecipacao" and not st.session_state["modo_leitura"]:
     exigir_login(config)
 
 
@@ -537,6 +541,17 @@ def _barra_lateral_atualizar_dados():
                 f"{len(quitadas)} notas quitadas atualizadas."
             )
             st.rerun()
+
+        if (BASE_DIR / ".git").exists():
+            st.divider()
+            st.caption("Envia um retrato dos dados de agora pro portal público na nuvem.")
+            if st.button("☁️ Publicar para nuvem", width="stretch"):
+                with st.spinner("Publicando..."):
+                    try:
+                        mensagem = publicar_dados()
+                        st.success(mensagem)
+                    except Exception as erro:
+                        st.error(str(erro))
 
         for aviso in st.session_state.get("avisos_sync", []):
             st.warning(f"⚠️ {aviso}")

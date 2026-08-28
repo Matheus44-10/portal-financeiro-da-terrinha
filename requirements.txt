@@ -2,7 +2,7 @@ playwright
 streamlit
 pandas
 openpyxl
-pywin32
+pywin32; sys_platform == "win32"
 streamlit-aggrid
 pdfplumber
 pytesseract
