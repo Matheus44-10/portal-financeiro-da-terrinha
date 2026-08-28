@@ -1,0 +1,20 @@
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
+
+# Credenciais e configuração sensível
+.env
+config/settings.toml
+
+# Sessão/estado do navegador (pode conter cookies/dados sensíveis)
+storage_state.json
+*.har
+trace.zip
+
+# Dados extraídos e vínculos manuais (dados sensíveis do financeiro)
+dados/
+*.db
+
+# Boletos baixados para checagem de factoring (dados sensíveis do financeiro)
+anexos_baixados/

@@ -1,0 +1,28 @@
+# Copie este arquivo para settings.toml e ajuste os valores.
+# settings.toml NUNCA deve ser versionado (já está no .gitignore).
+# Credenciais do Bluesoft NÃO ficam aqui - login é manual assistido, sessão salva em storage_state.json.
+
+[busca]
+# Período (data de vencimento) considerado na busca de notas de devolução e contas a pagar em aberto.
+data_inicial = 2026-01-01
+data_final = 2026-12-31
+
+[intercompany]
+# Nomes (ou trechos, por palavra inteira) de empresas/lojas do próprio grupo Daterrinha - notas onde
+# o fornecedor bate com um desses nomes são transferência interna, não cobrança a fornecedor externo,
+# e ficam de fora do app. Comparação por palavra inteira (case-insensitive): "MASTER" não bate com
+# "MASTERSENSE" (fornecedor externo real).
+nomes = ["2JM", "OKKER", "TERRAFEC", "TERRINHA", "FFAMM", "MASTER", "SAVE"]
+
+[auth]
+# Login de acesso ao app (não é senha do Bluesoft - é só uma trava de acesso ao próprio site local).
+# A senha nunca fica em texto puro aqui - senha_hash é o hash SHA-256 dela. Para gerar um novo hash:
+# python -c "import hashlib; print(hashlib.sha256('SUA_SENHA'.encode()).hexdigest())"
+usuario = "usuario_exemplo"
+senha_hash = "coloque_aqui_o_hash_sha256_da_senha"
+
+[antecipacao]
+# Planilha externa (mantida manualmente pelo financeiro) com os descontos ganhos por antecipar
+# pagamento a fornecedores. O portal só lê esse arquivo (aba "report") - opcional, se não
+# configurar essa chave a página "Antecipação de Fornecedores" mostra um aviso em vez de erro.
+caminho_planilha = "C:\\caminho\\para\\Report de antecipação dos fornecedores.xlsx"

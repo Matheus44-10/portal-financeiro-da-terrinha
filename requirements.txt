@@ -1,0 +1,9 @@
+playwright
+streamlit
+pandas
+openpyxl
+pywin32
+streamlit-aggrid
+pdfplumber
+pytesseract
+Pillow

@@ -1,0 +1,16 @@
+[theme]
+primaryColor = "#EE6931"
+backgroundColor = "#FFFBF7"
+secondaryBackgroundColor = "#F7EFE9"
+textColor = "#1A1A1A"
+font = "Montserrat:https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap"
+headingFont = "Montserrat:https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700&display=swap"
+borderColor = "#F0D9CE"
+baseRadius = "10px"
+showWidgetBorder = true
+dataframeBorderColor = "#F0D9CE"
+dataframeHeaderBackgroundColor = "#FBEAE0"
+greenColor = "#2E7D32"
+redColor = "#C62828"
+orangeColor = "#EE6931"
+chartCategoricalColors = ["#EE6931", "#2E7D32", "#1F6FEB", "#8250DF", "#C62828", "#BF8700", "#57606A"]
