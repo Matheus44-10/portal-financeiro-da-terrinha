@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -52,3 +53,20 @@ def carregar_antecipacoes(caminho: Path) -> list[Antecipacao]:
         )
         for linha in df.itertuples()
     ]
+
+
+def data_modificacao(caminho: Path) -> datetime:
+    """Quando a planilha foi modificada pela última vez pelo financeiro.
+
+    Na nuvem o `caminho` é um retrato versionado no git, cujo mtime é a hora em que o Streamlit
+    Community Cloud clonou o repositório - nunca a hora em que alguém mexeu na planilha de verdade.
+    Por isso `publicacao.publicar_dados` grava a data real num `antecipacao_meta.json` ao lado, e é
+    ela que vale quando existe. Localmente esse arquivo não existe e o mtime do próprio arquivo já
+    é a resposta certa."""
+    meta = caminho.with_name("antecipacao_meta.json")
+    if meta.exists():
+        try:
+            return datetime.fromisoformat(json.loads(meta.read_text(encoding="utf-8"))["modificada_em"])
+        except (ValueError, KeyError, OSError):
+            pass
+    return datetime.fromtimestamp(caminho.stat().st_mtime)

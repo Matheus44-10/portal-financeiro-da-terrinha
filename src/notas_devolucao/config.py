@@ -45,6 +45,14 @@ def carregar_configuracao(caminho: Path = CONFIG_PATH) -> Configuracao:
         dados = tomllib.load(f)
 
     caminho_planilha_antecipacao = dados.get("antecipacao", {}).get("caminho_planilha")
+    # Caminho relativo é resolvido a partir da raiz do projeto, não do diretório de trabalho: o
+    # settings.toml local aponta pra planilha absoluta do OneDrive, mas o settings.cloud.toml
+    # aponta pro retrato versionado em `dados_publicados/` (caminho relativo), e não dá pra contar
+    # com qual diretório o Streamlit Community Cloud usa como CWD.
+    if caminho_planilha_antecipacao:
+        caminho_planilha_antecipacao = Path(caminho_planilha_antecipacao)
+        if not caminho_planilha_antecipacao.is_absolute():
+            caminho_planilha_antecipacao = BASE_DIR / caminho_planilha_antecipacao
 
     return Configuracao(
         data_inicial=dados["busca"]["data_inicial"],
@@ -52,6 +60,6 @@ def carregar_configuracao(caminho: Path = CONFIG_PATH) -> Configuracao:
         intercompany_nomes=dados.get("intercompany", {}).get("nomes", []),
         auth_usuario=dados["auth"]["usuario"],
         auth_senha_hash=dados["auth"]["senha_hash"],
-        antecipacao_planilha_path=Path(caminho_planilha_antecipacao) if caminho_planilha_antecipacao else None,
+        antecipacao_planilha_path=caminho_planilha_antecipacao,
         visualizacao_token=dados.get("visualizacao", {}).get("token") or None,
     )

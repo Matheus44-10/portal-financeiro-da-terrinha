@@ -18,7 +18,7 @@ from st_aggrid import AgGrid, ColumnsAutoSizeMode, DataReturnMode, GridOptionsBu
 from st_aggrid.shared import JsCode
 
 from notas_devolucao import storage
-from notas_devolucao.antecipacao import Antecipacao, carregar_antecipacoes
+from notas_devolucao.antecipacao import Antecipacao, carregar_antecipacoes, data_modificacao
 from notas_devolucao.config import BASE_DIR, MODO_NUVEM, carregar_configuracao
 from notas_devolucao.email_cobranca import abrir_no_outlook
 from notas_devolucao.login import exigir_login
@@ -548,7 +548,7 @@ def _barra_lateral_atualizar_dados():
             if st.button("☁️ Publicar para nuvem", width="stretch"):
                 with st.spinner("Publicando..."):
                     try:
-                        mensagem = publicar_dados()
+                        mensagem = publicar_dados(config.antecipacao_planilha_path)
                         st.success(mensagem)
                     except Exception as erro:
                         st.error(str(erro))
@@ -811,7 +811,7 @@ def pagina_home():
             col_desconto_home.metric("Desconto financeiro ganho", f"R$ {total_desconto_antecipacao:,.2f}")
             col_percentual_home.metric("% ganho médio", f"{percentual_medio_antecipacao:.2%}")
             dias_desde_modificacao_home = (
-                datetime.now() - datetime.fromtimestamp(config.antecipacao_planilha_path.stat().st_mtime)
+                datetime.now() - data_modificacao(config.antecipacao_planilha_path)
             ).days
             if dias_desde_modificacao_home > 35:
                 st.caption(f"⚠️ Planilha sem atualização há {dias_desde_modificacao_home} dias.")
@@ -1485,7 +1485,7 @@ def pagina_antecipacao():
         st.error(f"Planilha não encontrada em: {config.antecipacao_planilha_path}")
         return
 
-    ultima_modificacao_planilha = datetime.fromtimestamp(config.antecipacao_planilha_path.stat().st_mtime)
+    ultima_modificacao_planilha = data_modificacao(config.antecipacao_planilha_path)
     dias_desde_modificacao = (datetime.now() - ultima_modificacao_planilha).days
     texto_ultima_modificacao = (
         f"🕓 Planilha modificada pela última vez em "

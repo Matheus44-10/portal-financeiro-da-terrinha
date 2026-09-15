@@ -253,6 +253,33 @@ Cloud (gratuito), reaproveitando o GitHub que a gente já tinha:
   funcionou normalmente. Vale lembrar isso é o comportamento normal (a tela de "sem acesso" aparece
   igual tanto pra quem não está na lista quanto pra quem está mas ainda não logou).
 
+**Antecipação de Fornecedores na nuvem (2026-09-15):** a página `/antecipacao` abria no app da nuvem
+mas só mostrava "Caminho da planilha não configurado". Duas causas empilhadas: (1) o
+`settings.cloud.toml` não tinha a seção `[antecipacao]`, então `antecipacao_planilha_path` vinha
+`None`; (2) mesmo com a seção, o caminho do `settings.toml` local aponta pra planilha no OneDrive do
+financeiro, que não existe na máquina do Streamlit Community Cloud - só adicionar a chave teria
+trocado a mensagem por "Planilha não encontrada em: C:\Users\...". A raiz do problema é que a
+planilha era a única fonte de dados do portal que nunca entrava na publicação (o `publicar_dados`
+levava só o banco). Corrigido:
+
+- **`publicar_dados(planilha_antecipacao)`** passou a copiar a planilha pra
+  `dados_publicados/antecipacao.xlsx` e commitar junto com o banco (o `app.py` passa
+  `config.antecipacao_planilha_path`). Um clique em "☁️ Publicar para nuvem" continua atualizando
+  tudo.
+- **`dados_publicados/antecipacao_meta.json`** guarda a data de modificação real da planilha, porque
+  o git não versiona mtime: na nuvem o mtime do arquivo é a hora do deploy, o que faria o aviso
+  "pode estar desatualizada" (>35 dias, na página e na Home) nunca disparar - exatamente o aviso que
+  existe pra pegar planilha esquecida. Lido por `antecipacao.data_modificacao`, que cai no mtime
+  normal quando o meta não existe (caso local).
+- **Caminho relativo em `carregar_configuracao`** é resolvido a partir de `BASE_DIR`, não do CWD - o
+  `settings.cloud.toml` aponta pra `dados_publicados/antecipacao.xlsx` e não dá pra contar com qual
+  diretório o Streamlit Community Cloud usa como diretório de trabalho.
+- **`.claude/launch.json`** ganhou a configuração `portal-modo-nuvem` (porta 8502,
+  `PORTAL_MODO_NUVEM=1`) pra testar o modo nuvem localmente antes de publicar - foi com ela que a
+  correção foi validada (115 linhas, R$ 1.060.005,57 líquido, R$ 31.815,84 de desconto, data
+  10/09/2026 vinda do meta e não do mtime).
+
+
 ## Notas operacionais importantes
 
 - **F5 vs. reiniciar o processo:** editar `app.py` só precisa de F5 na página. Editar qualquer

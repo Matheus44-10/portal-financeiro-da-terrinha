@@ -17,3 +17,9 @@ nomes = ["2JM", "OKKER", "TERRAFEC", "TERRINHA", "FFAMM", "MASTER", "SAVE"]
 # carregar sem erro.
 usuario = "nao_usado"
 senha_hash = "nao_usado"
+
+[antecipacao]
+# Retrato versionado da planilha de antecipação, gravado pelo botão "☁️ Publicar para nuvem" do app
+# local. Caminho relativo à raiz do projeto de propósito: a planilha de verdade mora no OneDrive do
+# financeiro (caminho absoluto no settings.toml local), que não existe na máquina da nuvem.
+caminho_planilha = "dados_publicados/antecipacao.xlsx"
