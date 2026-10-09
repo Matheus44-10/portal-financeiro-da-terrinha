@@ -59,11 +59,17 @@ def publicar_dados(planilha_antecipacao: Path | None = None) -> str:
     if resultado_add.returncode != 0:
         raise RuntimeError(f"Falha ao preparar a publicação (git add): {resultado_add.stderr.strip()}")
 
-    resultado_commit = _git("commit", "-m", "Publica dados para o portal de visualizacao")
+    # Nada mudou desde a última publicação: checa direto no que foi preparado, em vez de depender do
+    # texto do `git commit` - com outro arquivo modificado (fora da publicação) na pasta, o git
+    # responde "no changes added to commit" em vez de "nothing to commit", e isso aparecia como
+    # "Falha ao publicar (git commit):" com a mensagem vazia.
+    if _git("diff", "--cached", "--quiet", "--", *caminhos_relativos).returncode == 0:
+        return "Os dados já estavam publicados - nenhuma mudança desde a última vez."
+
+    resultado_commit = _git("commit", "-m", "Publica dados para o portal de visualizacao", "--", *caminhos_relativos)
     if resultado_commit.returncode != 0:
-        if "nothing to commit" in resultado_commit.stdout.lower():
-            return "Os dados já estavam publicados - nenhuma mudança desde a última vez."
-        raise RuntimeError(f"Falha ao publicar (git commit): {resultado_commit.stderr.strip()}")
+        detalhe = (resultado_commit.stderr or resultado_commit.stdout).strip()
+        raise RuntimeError(f"Falha ao publicar (git commit): {detalhe}")
 
     resultado_push = _git("push")
     if resultado_push.returncode != 0:

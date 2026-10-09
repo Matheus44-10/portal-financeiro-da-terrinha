@@ -78,6 +78,7 @@ def _tabela_notas(notas: list[NotaDevolucao], vinculos_por_nota: dict[str, list[
     linhas = [
         {
             "Nº NF": numero_documento,
+            "Emissão": min(p.data_emissao for p in parcelas).strftime("%d/%m/%Y"),
             "Tipo": parcelas[0].tipo,
             "Valor líquido": sum(p.valor_liquido for p in parcelas),
             "Vencimento mais próximo": min(p.data_vencimento for p in parcelas).strftime("%d/%m/%Y"),
