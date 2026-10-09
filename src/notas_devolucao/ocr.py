@@ -38,10 +38,13 @@ def _configurar_tesseract() -> None:
     )
 
 
-def _ocr_imagem(imagem: Image.Image) -> str:
+def _ocr_imagem(imagem: Image.Image, psm: int = 6, cinza: bool = True) -> str:
+    """Escala de cinza + `--psm 6` (bloco único de texto) - mesma receita do projeto "Lançamento de
+    notas". Numa amostra de 10 boletos em imagem que ficavam "não confirmados", a leitura colorida
+    com o layout automático (psm 3) não achou CNPJ em nenhum; cinza + psm 6 achou em 4."""
     _configurar_tesseract()
     try:
-        return pytesseract.image_to_string(imagem, lang="por")
+        return pytesseract.image_to_string(imagem.convert("L") if cinza else imagem, lang="por", config=f"--psm {psm}")
     except pytesseract.TesseractError as e:
         if "por.traineddata" in str(e) or "Failed loading language" in str(e):
             raise RuntimeError(
@@ -51,7 +54,7 @@ def _ocr_imagem(imagem: Image.Image) -> str:
         raise
 
 
-def extrair_texto_via_ocr_pdf(caminho: Path, resolucao: int = 300) -> str:
+def extrair_texto_via_ocr_pdf(caminho: Path, resolucao: int = 300, psm: int = 6, cinza: bool = True) -> str:
     """OCR de um PDF escaneado (sem camada de texto) - renderiza cada página como imagem (usando
     o próprio `pdfplumber`, que já tem Pillow/pypdfium2 como dependência - não precisa de
     Poppler/pdf2image à parte) e roda OCR em cada uma."""
@@ -59,11 +62,11 @@ def extrair_texto_via_ocr_pdf(caminho: Path, resolucao: int = 300) -> str:
     with pdfplumber.open(caminho) as pdf:
         for pagina in pdf.pages:
             imagem = pagina.to_image(resolution=resolucao).original
-            textos.append(_ocr_imagem(imagem))
+            textos.append(_ocr_imagem(imagem, psm=psm, cinza=cinza))
     return "\n".join(textos)
 
 
-def extrair_texto_via_ocr_imagem(caminho: Path) -> str:
+def extrair_texto_via_ocr_imagem(caminho: Path, psm: int = 6, cinza: bool = True) -> str:
     """OCR de um anexo que é diretamente uma imagem (ex.: boleto em foto/print .jpg/.jpeg)."""
     with Image.open(caminho) as imagem:
-        return _ocr_imagem(imagem)
+        return _ocr_imagem(imagem, psm=psm, cinza=cinza)

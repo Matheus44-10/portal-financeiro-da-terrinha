@@ -6,7 +6,7 @@
 # mudança aqui também (e publique de novo) para os dois ficarem consistentes.
 
 [busca]
-data_inicial = 2026-01-01
+data_inicial = 2021-01-01
 data_final = 2026-12-31
 
 [intercompany]

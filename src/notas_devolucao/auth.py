@@ -40,8 +40,18 @@ def criar_contexto(browser: Browser) -> BrowserContext:
 
 
 def sessao_esta_ativa(page: Page) -> bool:
-    page.goto(f"{BLUESOFT_BASE_URL}/erp-app/areas/core/menu-central/menu-central.index.jsp")
-    page.wait_for_load_state("networkidle")
+    # `domcontentloaded` em vez do padrão "load": desde out/2026 a tela de login do Bluesoft embute
+    # um vídeo do YouTube/blog que às vezes nunca termina de carregar - com "load" o goto estourava
+    # o timeout de 30s e o sync inteiro quebrava antes de chegar a pedir o login manual.
+    page.goto(
+        f"{BLUESOFT_BASE_URL}/erp-app/areas/core/menu-central/menu-central.index.jsp",
+        wait_until="domcontentloaded",
+        timeout=60_000,
+    )
+    try:
+        page.wait_for_load_state("networkidle", timeout=15_000)
+    except Exception:
+        pass
     # goto sempre "sucede" mesmo se o Bluesoft redirecionar para a tela de login (SPA) -
     # o único jeito confiável de saber se logou é checar se NÃO há campo de senha na tela.
     return page.locator('input[type="password"]').count() == 0
@@ -49,7 +59,7 @@ def sessao_esta_ativa(page: Page) -> bool:
 
 def aguardar_login_manual(page: Page, contexto: BrowserContext, timeout_ms: int = 180_000) -> None:
     """Abre a tela de login e espera o usuário logar manualmente (sem ver/pedir senha)."""
-    page.goto(URL_LOGIN)
+    page.goto(URL_LOGIN, wait_until="domcontentloaded", timeout=60_000)
     logger.info("Aguardando login manual no navegador (até %s segundos)...", timeout_ms // 1000)
 
     intervalo_ms = 2000

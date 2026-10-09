@@ -70,16 +70,28 @@ def extrair_texto_pdf(caminho: Path) -> str:
 
 # --- Extração do CNPJ do beneficiário no texto do boleto (portado de bordero_edi/validacao.py) ---
 
-# Separadores como `\D` (qualquer caractere não-dígito), não os literais "." "/" "-": confirmado
-# ao vivo (duplicata 1269853, boleto SICOOB) que a extração de texto de alguns PDFs corrompe
-# caracteres especiais por causa da fonte embutida do banco emissor - a barra "/" do CNPJ vira
-# letras soltas tipo "i" ou "t" (ex.: "79.125.936i0001-07" em vez de "79.125.936/0001-07"). Exigir
-# a pontuação exata fazia o CNPJ nem ser reconhecido, mesmo com o rótulo "Beneficiário" do lado.
-_PADRAO_CNPJ = re.compile(r"\d{2}\D\d{3}\D\d{3}\D\d{4}\D\d{2}")
-_ROTULOS_BENEFICIARIO = ("beneficiario", "cedente", "favorecido")
-_ROTULOS_PAGADOR = ("pagador", "sacado")
-_ROTULOS_EXCLUIR = ("beneficiario final",)
+# Separadores OPCIONAIS e de qualquer tipo (`\D?`) - dois casos reais confirmados nos anexos já
+# baixados (out/2026): (1) a fonte embutida de alguns PDFs corrompe a pontuação ("79.125.936i0001-07",
+# boleto SICOOB da duplicata 1269853); (2) muitos boletos, principalmente Sicredi, imprimem o CNPJ
+# como 14 dígitos corridos sem pontuação nenhuma ("... PLANALTINA DO PARANA 62018886000158") - esse
+# segundo caso sozinho respondia por ~100 dos "não confirmados". Como aceitar qualquer sequência de
+# 14 dígitos abre espaço pra lixo (linha digitável, telefone), só vale como CNPJ o que passa no
+# dígito verificador (`_cnpj_valido`).
+_PADRAO_CNPJ = re.compile(r"(?<!\d)\d{2}\D?\d{3}\D?\d{3}\D?\d{4}\D?\d{2}(?!\d)")
+# Rótulo do beneficiário tolerante a OCR: o Tesseract lê "Beneficiário" como "Beneliciário",
+# "Benef1ciario" etc. (confirmado em boletos do Moinho Romariz) - o literal nunca casava.
+_ROTULO_BENEFICIARIO = re.compile(r"bene\w{0,3}ci\w{0,2}rio|cedente|favorecido")
+# "Beneficiário final" e "Sacador/Avalista" são o fornecedor ORIGINAL num boleto cedido a um fundo -
+# nunca podem ser lidos como o beneficiário (daria um "normal" falso justamente no caso de factoring).
+_ROTULO_BENEFICIARIO_FINAL = re.compile(r"bene\w{0,3}ci\w{0,2}rio\s*final")
+_ROTULO_PAGADOR = re.compile(r"pagador|sacado|sacador|avalista")
 _JANELA_LINHAS = 6
+# CNPJ das empresas do grupo que pagam os boletos (Da Terrinha, 2JM Amidos) - nunca são o beneficiário.
+_RAIZES_PAGADOR = {"15074376", "45210657"}
+# Linha digitável do boleto ("34191.09008 02406.410775 ...") - o último bloco dela (fator de
+# vencimento + valor) tem 14 dígitos corridos e às vezes passa no dígito verificador de CNPJ por
+# coincidência (caso real: duplicata 1361654, "14520001556447"). Linhas assim nunca têm CNPJ.
+_PADRAO_LINHA_DIGITAVEL = re.compile(r"\d{5}\D\d{5}\s+\d{5}\D\d{6}")
 
 
 def _normalizar(texto: str) -> str:
@@ -89,6 +101,18 @@ def _normalizar(texto: str) -> str:
 
 def _so_digitos(texto: str) -> str:
     return re.sub(r"\D", "", texto)
+
+
+def _cnpj_valido(digitos: str) -> bool:
+    if len(digitos) != 14 or len(set(digitos)) == 1:
+        return False
+
+    def _dv(base: str) -> int:
+        pesos = list(range(len(base) - 7, 1, -1)) + list(range(9, 1, -1))
+        resto = sum(int(d) * p for d, p in zip(base, pesos)) % 11
+        return 0 if resto < 2 else 11 - resto
+
+    return _dv(digitos[:12]) == int(digitos[12]) and _dv(digitos[:13]) == int(digitos[13])
 
 
 def _raiz_cnpj(cnpj: str) -> str:
@@ -101,37 +125,65 @@ def _raiz_cnpj(cnpj: str) -> str:
     return digitos[:8]
 
 
-def extrair_cnpjs_beneficiario(texto_boleto: str) -> tuple[list[str], str]:
+def _limpar_texto(texto: str) -> str:
+    # Alguns PDFs saem do pdfplumber com "(cid:3)" no lugar de espaço (fonte sem mapa de caracteres).
+    return texto.replace("(cid:3)", " ")
+
+
+def extrair_cnpjs_beneficiario(texto_boleto: str) -> tuple[list[str], list[str], str]:
     """Acha o(s) CNPJ(s) do BENEFICIÁRIO/CEDENTE (quem recebe o pagamento) no boleto -
     especificamente, não qualquer CNPJ impresso em qualquer lugar do documento (um CNPJ de
     referência/descrição pode aparecer no texto sem ser o beneficiário de verdade - mesmo cuidado
     já validado no projeto irmão "Criação de borderô EDI titulos", caso Dell/Supplier Flexpay).
 
-    Acha linhas com um rótulo de beneficiário ("beneficiário", "cedente", "favorecido") e procura
-    um CNPJ nela mesma ou nas linhas seguintes (janela de `_JANELA_LINHAS`) - mas para de procurar
-    se topar com um rótulo de pagador/sacado antes, pra não vazar pro CNPJ da seção errada.
+    Acha linhas com um rótulo de beneficiário e procura um CNPJ nela mesma ou nas linhas seguintes
+    (janela de `_JANELA_LINHAS`) - mas para de procurar se topar com um rótulo de pagador/sacado/
+    sacador/avalista/beneficiário final antes, pra não vazar pro CNPJ da seção errada.
 
-    Retorna os CNPJs achados (só dígitos) e o trecho de texto onde foram encontrados, para
-    conferência humana."""
+    Retorna (CNPJs válidos, CNPJs com dígito verificador inválido - provável erro de OCR -, trecho
+    de texto onde foram encontrados, para conferência humana)."""
     linhas = texto_boleto.splitlines()
     linhas_norm = [_normalizar(l) for l in linhas]
-    cnpjs_achados: set[str] = set()
+    validos: set[str] = set()
+    invalidos: set[str] = set()
     trechos: list[str] = []
 
     for i, linha_norm in enumerate(linhas_norm):
-        if any(rotulo in linha_norm for rotulo in _ROTULOS_EXCLUIR):
-            continue
-        if not any(rotulo in linha_norm for rotulo in _ROTULOS_BENEFICIARIO):
+        if _ROTULO_BENEFICIARIO_FINAL.search(linha_norm) or not _ROTULO_BENEFICIARIO.search(linha_norm):
             continue
         for j in range(i, min(i + _JANELA_LINHAS, len(linhas))):
-            if j > i and any(rotulo in linhas_norm[j] for rotulo in _ROTULOS_PAGADOR):
+            if j > i and (_ROTULO_PAGADOR.search(linhas_norm[j]) or _ROTULO_BENEFICIARIO_FINAL.search(linhas_norm[j])):
                 break
-            encontrados = _PADRAO_CNPJ.findall(linhas[j])
+            if _PADRAO_LINHA_DIGITAVEL.search(linhas[j]):
+                continue
+            encontrados = [_so_digitos(m) for m in _PADRAO_CNPJ.findall(linhas[j])]
+            encontrados = [c for c in encontrados if _raiz_cnpj(c) not in _RAIZES_PAGADOR]
             if encontrados:
-                cnpjs_achados.update(_so_digitos(m) for m in encontrados)
+                for c in encontrados:
+                    (validos if _cnpj_valido(c) else invalidos).add(c)
                 trechos.append(linhas[j].strip())
 
-    return sorted(cnpjs_achados), " | ".join(dict.fromkeys(trechos))
+    return sorted(validos), sorted(invalidos), " | ".join(dict.fromkeys(trechos))
+
+
+def _cnpjs_fora_do_bloco_pagador(texto: str) -> list[str]:
+    """Todos os CNPJs válidos do documento, menos os do bloco do pagador/sacado/sacador/avalista
+    (a linha do rótulo e as 2 seguintes, onde ficam os valores) e o da própria Da Terrinha."""
+    linhas = texto.splitlines()
+    linhas_norm = [_normalizar(l) for l in linhas]
+    bloqueadas: set[int] = set()
+    for i, linha_norm in enumerate(linhas_norm):
+        if _ROTULO_PAGADOR.search(linha_norm) or _ROTULO_BENEFICIARIO_FINAL.search(linha_norm):
+            bloqueadas.update(range(i, i + 3))
+    achados: set[str] = set()
+    for i, linha in enumerate(linhas):
+        if i in bloqueadas or _PADRAO_LINHA_DIGITAVEL.search(linha):
+            continue
+        for m in _PADRAO_CNPJ.findall(linha):
+            c = _so_digitos(m)
+            if _cnpj_valido(c) and _raiz_cnpj(c) not in _RAIZES_PAGADOR:
+                achados.add(c)
+    return sorted(achados)
 
 
 # Alguns boletos (confirmado ao vivo: layout Bradesco da duplicata 1554727) não têm nenhuma palavra
@@ -140,14 +192,20 @@ def extrair_cnpjs_beneficiario(texto_boleto: str) -> tuple[list[str], str]:
 # (FIDC, "Fundo de Investimento em Direitos Creditórios", "Fomento Mercantil", etc.) - procurar
 # esses termos é um sinal independente e mais confiável que a busca por rótulo nesses casos. Foi
 # esse padrão que revelou a duplicata 1554727 como factoring de verdade (GFM FUNDO DE INV. EM
-# DIREITOS CREDITORIOS MULTICREDITO), que a busca por rótulo sozinha não pegava.
+# DIREITOS CREDITORIOS MULTICREDITO), que a busca por rótulo sozinha não pegava. "fundo de
+# investimento"/"fundo de inv." entraram depois de um caso real perdido ("CASE FUNDO DE
+# INVESTIMENTO", sem "direitos creditórios" no nome).
 _PALAVRAS_CHAVE_FACTORING = (
-    "fundo de investimento em direitos creditorios",
+    "fundo de investimento",
+    "fundo de inv.",
     "direitos creditorios",
     "fomento mercantil",
     "factoring",
     "securitizadora",
+    "securitizacao",
     "fidc",
+    "cessao de credito",
+    "credito cedido",
 )
 
 
@@ -160,9 +218,146 @@ def detectar_indicio_factoring(texto: str) -> tuple[list[str], str]:
     for i, linha_norm in enumerate(linhas_norm):
         if any(palavra in linha_norm for palavra in _PALAVRAS_CHAVE_FACTORING):
             janela = " ".join(linhas[max(0, i - 1) : i + 2])
-            cnpjs_na_janela = sorted({_so_digitos(m) for m in _PADRAO_CNPJ.findall(janela)})
+            cnpjs_na_janela = sorted(
+                {c for c in (_so_digitos(m) for m in _PADRAO_CNPJ.findall(janela)) if _cnpj_valido(c)}
+            )
             return cnpjs_na_janela, linhas[i].strip()
     return [], ""
+
+
+# Palavras genéricas de razão social - não identificam a empresa (mesma ideia do casamento por nome
+# do projeto "Lançamento de notas").
+_PALAVRAS_GENERICAS_NOME = {
+    "ltda", "eireli", "me", "epp", "sa", "s", "a", "comercio", "comercial", "industria", "industrial",
+    "ind", "com", "de", "da", "do", "das", "dos", "e", "imp", "exp", "importacao", "exportacao",
+    "produtos", "prod", "alimenticios", "alimentos", "distribuidora", "servicos", "brasil", "the",
+    "grupo", "cia", "companhia", "empresa", "embalagens", "fabrica",
+}
+
+
+def _palavras_do_nome(nome: str) -> set[str]:
+    palavras = re.findall(r"[a-z0-9]+", _normalizar(nome))
+    return {p for p in palavras if len(p) >= 3 and p not in _PALAVRAS_GENERICAS_NOME}
+
+
+def _nome_bate(texto: str, nome_favorecido: str) -> bool:
+    """O texto cita o fornecedor pelo nome? Exige 2 palavras significativas do nome (ou a única,
+    se o nome só tiver uma e ela for longa o bastante pra não casar por acaso)."""
+    palavras_nome = _palavras_do_nome(nome_favorecido)
+    if not palavras_nome:
+        return False
+    palavras_texto = set(re.findall(r"[a-z0-9]+", _normalizar(texto)))
+    em_comum = palavras_nome & palavras_texto
+    if len(palavras_nome) == 1:
+        return bool(em_comum) and len(next(iter(palavras_nome))) >= 6
+    return len(em_comum) >= 2
+
+
+def nome_recebedor_pix(texto: str) -> str | None:
+    """Nome do recebedor no "PIX copia e cola" impresso no boleto (padrão EMV do Banco Central:
+    pares ID(2) + tamanho(2) + valor; o campo 59 é o nome do recebedor). ~1/4 dos boletos que ficavam
+    sem resposta tinham esse código - é um sinal independente do rótulo "Beneficiário"."""
+    # Só junta as quebras de linha (o PDF quebra o código longo em várias linhas) - espaços de
+    # verdade fazem parte dos valores (o nome tem espaço) e contam no tamanho de cada campo.
+    compacto = re.sub(r"[ \t]*\r?\n[ \t]*", "", texto)
+    inicio = compacto.find("000201")
+    if inicio < 0 or "br.gov.bcb.pix" not in compacto.lower():
+        return None
+    i = inicio
+    while i + 4 <= len(compacto):
+        campo, tamanho = compacto[i : i + 2], compacto[i + 2 : i + 4]
+        if not (campo.isdigit() and tamanho.isdigit()):
+            return None
+        valor = compacto[i + 4 : i + 4 + int(tamanho)]
+        if campo == "59":
+            return valor or None
+        if campo == "63":
+            return None
+        i += 4 + int(tamanho)
+    return None
+
+
+def _bloco_do_beneficiario(texto: str) -> str:
+    """Texto do rótulo "Beneficiário/Cedente" e das 2 linhas seguintes (onde fica o nome), parando
+    no pagador/sacador - pra conferir o NOME quando o CNPJ saiu ilegível."""
+    linhas = texto.splitlines()
+    linhas_norm = [_normalizar(l) for l in linhas]
+    blocos = []
+    for i, linha_norm in enumerate(linhas_norm):
+        if _ROTULO_BENEFICIARIO_FINAL.search(linha_norm) or not _ROTULO_BENEFICIARIO.search(linha_norm):
+            continue
+        for j in range(i, min(i + 3, len(linhas))):
+            if j > i and _ROTULO_PAGADOR.search(linhas_norm[j]):
+                break
+            blocos.append(linhas[j])
+    return "\n".join(blocos)
+
+
+def _difere_em_um_digito(a: str, b: str) -> bool:
+    return len(a) == len(b) and sum(x != y for x, y in zip(a, b)) == 1
+
+
+def classificar_texto(
+    texto: str,
+    cnpj_cadastrado: str,
+    raizes_autorizadas: set[str] | frozenset[str] = frozenset(),
+    nome_favorecido: str = "",
+) -> tuple[str | None, list[str], str]:
+    """Decide, só pelo texto de um anexo, se o boleto foi emitido pelo fornecedor cadastrado
+    ("normal"), por outra empresa/fundo ("factoring") - ou None quando não dá pra decidir com
+    segurança. Retorna (status, CNPJs que embasaram a decisão, trecho/explicação).
+
+    Ordem dos sinais, do mais forte pro mais fraco:
+    1. CNPJ válido no campo Beneficiário/Cedente: raiz igual à cadastrada = normal, diferente =
+       factoring (mesmo que o texto cite "factoring" em algum aviso, o beneficiário manda).
+    2. Palavra-chave de fundo/factoring no texto = factoring.
+    3. CNPJ do beneficiário lido por OCR com dígito verificador inválido, mas a 1 dígito da raiz
+       cadastrada = normal (erro de OCR típico, ex.: 53.031.664 lido no lugar de 53.031.654).
+    4. Sem rótulo de beneficiário: se o ÚNICO CNPJ do documento (fora do bloco do pagador) é do
+       fornecedor cadastrado = normal.
+    5. Nome do recebedor no PIX copia-e-cola bate com o fornecedor = normal.
+    6. Nome do fornecedor escrito no campo Beneficiário (CNPJ ilegível) = normal.
+    Os sinais 5 e 6 só confirmam "normal" - nome diferente não basta pra afirmar factoring
+    (o PIX às vezes vem em nome do banco/intermediador de pagamento).
+
+    `raizes_autorizadas`: outras empresas (raiz do CNPJ) que o financeiro confirmou poderem emitir
+    boleto por esse fornecedor sem ser factoring (mesmo dono/grupo) - contam como o próprio
+    fornecedor (ver `storage.beneficiarios_autorizados`)."""
+    texto = _limpar_texto(texto)
+    raiz_cadastrada = _raiz_cnpj(cnpj_cadastrado)
+    raizes_aceitas = {raiz_cadastrada} | set(raizes_autorizadas)
+
+    validos, invalidos, trecho = extrair_cnpjs_beneficiario(texto)
+    cnpjs_kw, trecho_kw = detectar_indicio_factoring(texto)
+
+    if validos:
+        raizes_validas = {_raiz_cnpj(c) for c in validos}
+        if raiz_cadastrada in raizes_validas:
+            return "normal", validos, trecho
+        if raizes_validas & raizes_aceitas:
+            return "normal", validos, f"{trecho} (beneficiário autorizado para este fornecedor)"
+        return "factoring", validos, " | ".join(dict.fromkeys(t for t in (trecho, trecho_kw) if t))
+
+    if trecho_kw:
+        return "factoring", cnpjs_kw, trecho_kw
+
+    if any(_difere_em_um_digito(_raiz_cnpj(c), raiz_cadastrada) for c in invalidos):
+        return "normal", invalidos, f"{trecho} (lido por OCR - 1 dígito divergente do cadastro)"
+
+    outros = _cnpjs_fora_do_bloco_pagador(texto)
+    if outros and {_raiz_cnpj(c) for c in outros} <= raizes_aceitas:
+        return "normal", outros, "CNPJ do fornecedor encontrado no boleto (sem rótulo de beneficiário legível)"
+
+    if nome_favorecido:
+        recebedor_pix = nome_recebedor_pix(texto)
+        if recebedor_pix and _nome_bate(recebedor_pix, nome_favorecido):
+            return "normal", [], f"Recebedor do PIX do boleto: {recebedor_pix}"
+        bloco = _bloco_do_beneficiario(texto)
+        if bloco and _nome_bate(bloco, nome_favorecido):
+            trecho_nome = " | ".join(l.strip() for l in bloco.splitlines() if l.strip())
+            return "normal", [], f"{trecho_nome} (nome do fornecedor no campo beneficiário)"
+
+    return None, [], ""
 
 
 # --- Download do anexo de boleto (portado de bordero_edi/anexos.py, adaptado para Page) ---
@@ -181,7 +376,7 @@ def _localizar_linhas_candidatas(page: Page) -> list[Locator]:
     demais. Nem todo anexo de boleto tem literalmente a palavra "boleto" no nome do arquivo
     (confirmado ao vivo) - por isso, em vez de desistir quando nenhum nome bate, a chamadora
     (`verificar_duplicata`) tenta as demais também, uma a uma, até achar uma que se pareça com um
-    boleto de verdade (via `_texto_e_classificacao_do_anexo`)."""
+    boleto de verdade (via `classificar_anexo`)."""
     linhas = page.locator(".ui-grid-row")
     for _ in range(10):
         if linhas.count() > 0:
@@ -285,43 +480,92 @@ def visualizar_e_capturar_anexo(page: Page, duplicata_key: str, linha_boleto: Lo
 # --- Orquestração ---
 
 
-def _texto_e_classificacao_do_anexo(caminho: Path) -> tuple[str, list[str], str, list[str], str]:
-    """Extrai o texto de um anexo (nativo, com fallback OCR se vazio) e já roda os dois sinais de
-    classificação (indício de factoring por palavra-chave, CNPJ de beneficiário por rótulo).
-    Retorna (texto, cnpjs_palavra_chave, trecho_palavra_chave, cnpjs_beneficiario, trecho_beneficiario).
+def classificar_anexo(
+    caminho: Path,
+    cnpj_cadastrado: str,
+    raizes_autorizadas: set[str] | frozenset[str] = frozenset(),
+    nome_favorecido: str = "",
+) -> tuple[str, str | None, list[str], str]:
+    """Extrai o texto de um anexo e classifica (ver `classificar_texto`), tentando leituras cada vez
+    mais caras até alguma decidir: texto nativo do PDF -> OCR em escala de cinza com `--psm 6`
+    (bloco único - leu 15 de 17 boletos ilegíveis no projeto "Lançamento de notas") -> OCR com
+    layout automático (`--psm 3`) em cinza -> e por fim colorido (a leitura original).
 
-    Tenta OCR uma segunda vez mesmo quando o texto nativo não estava vazio, caso os dois sinais
-    deem vazio nele - confirmado ao vivo (duplicata 1269853, boleto SICOOB) que a fonte embutida de
-    alguns boletos corrompe a extração nativa de forma que o texto vem cheio de caracteres, mas a
-    própria palavra "Beneficiário" sai ilegível (virou algo como "Bene?ici??io"), fazendo o CNPJ
-    nunca ser achado porque o rótulo que ancora a busca não bate."""
+    O OCR roda mesmo quando o texto nativo não está vazio, se ele não decidiu nada - confirmado ao
+    vivo (duplicata 1269853, boleto SICOOB) que a fonte embutida de alguns boletos corrompe a
+    extração nativa (texto cheio de caracteres, mas "Beneficiário" ilegível).
+
+    Retorna (último texto legível, status ou None, CNPJs, trecho)."""
     eh_pdf = caminho.suffix.lower() == ".pdf"
 
-    def _extrair_ocr() -> str:
-        return ocr.extrair_texto_via_ocr_pdf(caminho) if eh_pdf else ocr.extrair_texto_via_ocr_imagem(caminho)
+    def _ocr(psm: int, cinza: bool = True) -> str:
+        if eh_pdf:
+            return ocr.extrair_texto_via_ocr_pdf(caminho, psm=psm, cinza=cinza)
+        return ocr.extrair_texto_via_ocr_imagem(caminho, psm=psm, cinza=cinza)
 
-    texto = extrair_texto_pdf(caminho) if eh_pdf else ""
-    if not texto.strip():
-        texto = _extrair_ocr()
+    # Cada leitura acerta boletos diferentes - a colorida com psm 3 (a original) continua como
+    # última tentativa porque leu certo alguns que a cinza não leu (ex.: duplicata 1361654).
+    extratores = [lambda: _ocr(6), lambda: _ocr(3), lambda: _ocr(3, cinza=False)]
+    if eh_pdf:
+        extratores.insert(0, lambda: extrair_texto_pdf(caminho))
 
-    if not texto.strip():
-        return texto, [], "", [], ""
-
-    cnpjs_kw, trecho_kw = detectar_indicio_factoring(texto)
-    cnpjs, trecho = ([], "") if trecho_kw else extrair_cnpjs_beneficiario(texto)
-
-    if not trecho_kw and not cnpjs:
-        texto_ocr = _extrair_ocr()
-        if texto_ocr.strip() and texto_ocr != texto:
-            texto = texto_ocr
-            cnpjs_kw, trecho_kw = detectar_indicio_factoring(texto)
-            if not trecho_kw:
-                cnpjs, trecho = extrair_cnpjs_beneficiario(texto)
-
-    return texto, cnpjs_kw, trecho_kw, cnpjs, trecho
+    ultimo_texto = ""
+    for extrator in extratores:
+        texto = extrator()
+        if not texto.strip():
+            continue
+        ultimo_texto = texto
+        status, cnpjs, trecho = classificar_texto(texto, cnpj_cadastrado, raizes_autorizadas, nome_favorecido)
+        if status:
+            return texto, status, cnpjs, trecho
+    return ultimo_texto, None, [], ""
 
 
-def verificar_duplicata(page: Page, conta: ContaPagar) -> BoletoFactoring:
+def anexos_ja_baixados(duplicata_key: str) -> list[Path]:
+    """Arquivos de anexo que uma verificação anterior já salvou em `anexos_baixados/`
+    (`duplicata_<chave>.<ext>`, `duplicata_<chave>_2.<ext>`...)."""
+    if not ANEXOS_DIR.exists():
+        return []
+    return sorted(
+        p for p in ANEXOS_DIR.glob(f"duplicata_{duplicata_key}*")
+        if p.stem == f"duplicata_{duplicata_key}" or p.stem.startswith(f"duplicata_{duplicata_key}_")
+    )
+
+
+def reclassificar_com_anexos_baixados(
+    boleto: BoletoFactoring, raizes_autorizadas: set[str] | frozenset[str] = frozenset()
+) -> BoletoFactoring | None:
+    """Reavalia um boleto "não verificado" usando só os anexos já baixados (sem abrir o Bluesoft).
+    Retorna o boleto atualizado, ou None se não há anexo salvo pra essa duplicata."""
+    arquivos = anexos_ja_baixados(boleto.duplicata_key)
+    if not arquivos:
+        return None
+    texto_legivel = False
+    for arquivo in arquivos:
+        try:
+            texto, status, cnpjs, trecho = classificar_anexo(
+                arquivo, boleto.favorecido_cnpj, raizes_autorizadas, boleto.favorecido
+            )
+        except Exception as erro:
+            logger.warning("Falha ao reler anexo %s: %r", arquivo.name, erro)
+            continue
+        texto_legivel = texto_legivel or bool(texto.strip())
+        if status:
+            boleto.status, boleto.cnpjs_encontrados, boleto.trecho_beneficiario = status, cnpjs, trecho
+            boleto.verificado_em = datetime.now()
+            return boleto
+    boleto.trecho_beneficiario = (
+        f"{len(arquivos)} anexo(s) lido(s) (nativo e OCR) mas nenhum CNPJ de beneficiário identificado."
+        if texto_legivel
+        else f"{len(arquivos)} anexo(s) tentado(s), nenhum com texto legível (nem nativo, nem OCR)."
+    )
+    boleto.verificado_em = datetime.now()
+    return boleto
+
+
+def verificar_duplicata(
+    page: Page, conta: ContaPagar, raizes_autorizadas: set[str] | frozenset[str] = frozenset()
+) -> BoletoFactoring:
     """Abre a duplicata, baixa o boleto anexado, extrai o texto (nativo, com fallback OCR) e
     compara o CNPJ do beneficiário achado no boleto com o favorecido cadastrado no Bluesoft. Nunca
     levanta exceção - falhas viram status "nao_verificado", pra não travar o processamento em lote."""
@@ -368,11 +612,11 @@ def verificar_duplicata(page: Page, conta: ContaPagar) -> BoletoFactoring:
         linhas_candidatas = _localizar_linhas_candidatas(page)
 
         texto = ""
-        cnpjs_palavra_chave: list[str] = []
-        trecho_palavra_chave = ""
+        status: str | None = None
         cnpjs_encontrados: list[str] = []
         trecho = ""
         anexos_tentados = 0
+        algum_texto_legivel = False
 
         for indice, linha in enumerate(linhas_candidatas):
             try:
@@ -383,11 +627,12 @@ def verificar_duplicata(page: Page, conta: ContaPagar) -> BoletoFactoring:
                 # tem "boleto" no nome, então pode haver vários candidatos a testar).
                 continue
             anexos_tentados += 1
-            texto, cnpjs_palavra_chave, trecho_palavra_chave, cnpjs_encontrados, trecho = (
-                _texto_e_classificacao_do_anexo(caminho_anexo)
+            texto, status, cnpjs_encontrados, trecho = classificar_anexo(
+                caminho_anexo, conta.favorecido_cnpj, raizes_autorizadas, conta.favorecido
             )
-            if trecho_palavra_chave or cnpjs_encontrados:
-                break  # achou indício de factoring ou CNPJ de beneficiário - não precisa tentar os outros
+            algum_texto_legivel = algum_texto_legivel or bool(texto.strip())
+            if status:
+                break  # decidiu (normal ou factoring) - não precisa tentar os outros anexos
 
         if anexos_tentados == 0:
             return BoletoFactoring(
@@ -397,40 +642,20 @@ def verificar_duplicata(page: Page, conta: ContaPagar) -> BoletoFactoring:
                 trecho_beneficiario="Nenhum dos anexos desta duplicata pôde ser baixado.",
             )
 
-        if not texto.strip():
+        if status:
             return BoletoFactoring(
-                **base,
-                status="nao_verificado",
-                cnpjs_encontrados=[],
-                trecho_beneficiario=(
-                    f"{anexos_tentados} anexo(s) tentado(s), nenhum com texto legível (nem nativo, nem OCR)."
-                ),
+                **base, status=status, cnpjs_encontrados=cnpjs_encontrados, trecho_beneficiario=trecho
             )
 
-        if trecho_palavra_chave:
-            return BoletoFactoring(
-                **base,
-                status="factoring",
-                cnpjs_encontrados=cnpjs_palavra_chave,
-                trecho_beneficiario=trecho_palavra_chave,
-            )
-
-        if not cnpjs_encontrados:
-            return BoletoFactoring(
-                **base,
-                status="nao_verificado",
-                cnpjs_encontrados=[],
-                trecho_beneficiario=(
-                    f"{anexos_tentados} anexo(s) lido(s) (nativo e OCR) mas nenhum CNPJ de "
-                    "beneficiário identificado."
-                ),
-            )
-
-        raiz_cadastrada = _raiz_cnpj(conta.favorecido_cnpj)
-        raizes_encontradas = {_raiz_cnpj(c) for c in cnpjs_encontrados}
-        status = "normal" if raiz_cadastrada in raizes_encontradas else "factoring"
         return BoletoFactoring(
-            **base, status=status, cnpjs_encontrados=cnpjs_encontrados, trecho_beneficiario=trecho
+            **base,
+            status="nao_verificado",
+            cnpjs_encontrados=[],
+            trecho_beneficiario=(
+                f"{anexos_tentados} anexo(s) lido(s) (nativo e OCR) mas nenhum CNPJ de beneficiário identificado."
+                if algum_texto_legivel
+                else f"{anexos_tentados} anexo(s) tentado(s), nenhum com texto legível (nem nativo, nem OCR)."
+            ),
         )
     except Exception as erro:
         logger.exception("Falha ao verificar duplicata %s.", conta.duplicata_key)

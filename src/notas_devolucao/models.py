@@ -24,8 +24,22 @@ class NotaDevolucao:
     # tela de detalhe da duplicata de cobrança) - None quando ainda não há vínculo nenhum.
     duplicata_pagamento_vinculada: str | None = None
     # Descrição do(s) item(s) da nota fiscal vinculada, lida direto do Bluesoft (ver
-    # navigation.obter_produtos_da_fatura) - None quando ainda não foi possível determinar.
+    # navigation.obter_detalhe_da_fatura) - None quando ainda não foi possível determinar.
     produtos: str | None = None
+
+
+@dataclass
+class DetalheDevolucao:
+    """O que se lê da fatura/nota fiscal de uma nota de devolução no Bluesoft - guardado à parte
+    (tabela `detalhes_devolucao`, cache permanente) e cruzado por `duplicata_key` tanto com as
+    notas pendentes quanto com as já quitadas."""
+
+    duplicata_key: str
+    fatura_key: str | None = None
+    produtos: str | None = None  # descrições separadas por "; " (mesmo formato de NotaDevolucao.produtos)
+    peso_kg: float | None = None
+    motivo: str | None = None
+    itens_json: str | None = None  # itens crus (descrição, quantidade, unidade, valor...) em JSON
 
 
 @dataclass

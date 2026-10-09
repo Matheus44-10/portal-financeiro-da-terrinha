@@ -207,23 +207,69 @@ def obter_fatura_key(page: Page) -> str | None:
     return resultado.group(1) if resultado else None
 
 
-def obter_produtos_da_fatura(page: Page, fatura_key: str) -> list[str]:
-    """Abre a fatura e cada nota fiscal vinculada a ela para ler a descrição dos itens (produtos)
-    na tabela `#itens` ("Itens da nota fiscal") - HTML estático, sem precisar de scope Angular.
-    Uma fatura pode ter mais de uma nota fiscal, e cada nota fiscal mais de um item."""
+_JS_DETALHE_NOTA_FISCAL = r"""
+() => {
+    const numero = (t) => {
+        t = (t || '').trim();
+        if (!t) return null;
+        // Itens vêm em formato brasileiro ("60.001,00"); peso da aba Transporte vem cru ("1.0").
+        if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+        const v = parseFloat(t);
+        return isNaN(v) ? null : v;
+    };
+    const itens = [];
+    document.querySelectorAll('table#itens tbody tr').forEach(tr => {
+        const desc = tr.querySelector('td.truncate');
+        if (!desc) return;  // cada item ocupa 3 <tr>; só a 1ª tem a descrição
+        const link = desc.querySelector('a[onclick*="abrirCentralRelatorioProduto"]');
+        const codigo = link ? (link.getAttribute('onclick').match(/'(\d+)'/) || [])[1] : null;
+        const celula = (id) => { const td = tr.querySelector('#' + id); return td ? td.innerText : null; };
+        itens.push({
+            descricao: (desc.getAttribute('title') || desc.innerText).trim(),
+            produto_key: codigo || null,
+            quantidade: numero(celula('quantidade-item')),
+            valor_bruto: numero(celula('valor-bruto')),
+            unidades_embalagem: numero(celula('unidades-embalagem')),
+        });
+    });
+    let pesoBruto = null, pesoLiquido = null;
+    document.querySelectorAll('#tabDadosDaTransportadora table').forEach(t => {
+        const cab = Array.from(t.querySelectorAll('thead th')).map(th => th.innerText.trim().toLowerCase());
+        const iBruto = cab.findIndex(c => c.startsWith('peso bruto'));
+        const iLiq = cab.findIndex(c => c.startsWith('peso l'));
+        if (iBruto < 0 && iLiq < 0) return;
+        const tds = t.querySelectorAll('tbody tr:first-child td');
+        if (iBruto >= 0 && tds[iBruto]) pesoBruto = numero(tds[iBruto].innerText);
+        if (iLiq >= 0 && tds[iLiq]) pesoLiquido = numero(tds[iLiq].innerText);
+    });
+    const info = Array.from(document.querySelectorAll('#tableInformacaoAdicional tbody td'))
+        .map(td => td.innerText.trim()).filter(Boolean).join(' | ');
+    return {itens, peso_bruto: pesoBruto, peso_liquido: pesoLiquido, informacoes_adicionais: info};
+}
+"""
+
+
+def obter_detalhe_da_fatura(page: Page, fatura_key: str) -> dict:
+    """Abre a fatura e cada nota fiscal vinculada a ela (uma fatura pode ter mais de uma NF, e cada
+    NF mais de um item) e lê: descrição, quantidade e valor de cada item, o peso bruto/líquido (aba "Transporte" - fica no HTML mesmo com a aba
+    escondida) e as "Informações adicionais da nota" de cada nota fiscal da fatura. Pesos de mais de
+    uma NF na mesma fatura são somados."""
     page.goto(f"{BLUESOFT_BASE_URL}/financeiro/fatura/index.action?faturaKey={fatura_key}")
     page.wait_for_timeout(1000)
-    nf_keys = dict.fromkeys(_PADRAO_NF_KEY.findall(page.content()))
+    nf_keys = list(dict.fromkeys(_PADRAO_NF_KEY.findall(page.content())))
 
-    produtos: list[str] = []
+    resultado = {"nf_keys": nf_keys, "itens": [], "peso_bruto": None, "peso_liquido": None, "informacoes_adicionais": []}
     for nf_key in nf_keys:
         page.goto(f"{BLUESOFT_BASE_URL}/comercial/consultaNotaFiscal/visualizar.action?nfKey={nf_key}")
         page.wait_for_timeout(1000)
-        for celula in page.locator("table#itens tbody td.truncate").all():
-            descricao = (celula.get_attribute("title") or "").strip()
-            if descricao and descricao not in produtos:
-                produtos.append(descricao)
-    return produtos
+        dados = page.evaluate(_JS_DETALHE_NOTA_FISCAL)
+        resultado["itens"].extend(dados["itens"])
+        for campo in ("peso_bruto", "peso_liquido"):
+            if dados[campo] is not None:
+                resultado[campo] = (resultado[campo] or 0) + dados[campo]
+        if dados["informacoes_adicionais"]:
+            resultado["informacoes_adicionais"].append(dados["informacoes_adicionais"])
+    return resultado
 
 
 _PADRAO_LOJA_PAGADORA = re.compile(r"Loja pagadora\s*\n(.+?)\n")

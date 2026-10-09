@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from .config import DADOS_DIR, DB_PATH
-from .models import BoletoFactoring, ContaPagar, NotaDevolucao, Vinculo
+from .models import BoletoFactoring, ContaPagar, DetalheDevolucao, NotaDevolucao, Vinculo
 from .relatorio_abatimento import NotaQuitada
 
 _SCHEMA = """
@@ -76,6 +76,31 @@ CREATE TABLE IF NOT EXISTS sincronizacao_info (
 CREATE TABLE IF NOT EXISTS contatos_fornecedor (
     fornecedor_cnpj TEXT PRIMARY KEY,
     email TEXT NOT NULL
+);
+
+-- Detalhe de cada nota de devolução lido da fatura/nota fiscal no Bluesoft (produto, peso em kg,
+-- motivo). Diferente das tabelas acima, NÃO é apagada a cada sync: esses dados não mudam depois que
+-- a nota existe, então funciona como cache permanente - assim o histórico de 5 anos só precisa
+-- visitar a fatura de cada nota uma vez na vida, e os syncs seguintes só leem o que for novo.
+CREATE TABLE IF NOT EXISTS detalhes_devolucao (
+    duplicata_key TEXT PRIMARY KEY,
+    fatura_key TEXT,
+    produtos TEXT,
+    peso_kg REAL,
+    motivo TEXT,
+    itens_json TEXT,
+    lido_em TEXT NOT NULL
+);
+
+-- Empresas que podem aparecer como beneficiário do boleto de um fornecedor sem que isso seja
+-- factoring (outra empresa do mesmo dono/grupo, depósito, filial com outro CNPJ) - informado pelo
+-- financeiro. Comparado pela raiz do CNPJ (8 primeiros dígitos), igual ao resto da checagem.
+CREATE TABLE IF NOT EXISTS beneficiarios_autorizados (
+    raiz_fornecedor TEXT NOT NULL,
+    raiz_beneficiario TEXT NOT NULL,
+    fornecedor TEXT NOT NULL DEFAULT '',
+    beneficiario TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (raiz_fornecedor, raiz_beneficiario)
 );
 
 CREATE TABLE IF NOT EXISTS boletos_factoring (
@@ -211,6 +236,43 @@ def salvar_cache(
                 )
                 for n in (quitadas or [])
             ],
+        )
+
+
+def carregar_detalhes_devolucao() -> dict[str, DetalheDevolucao]:
+    with _conexao() as conexao:
+        linhas = conexao.execute(
+            "SELECT duplicata_key, fatura_key, produtos, peso_kg, motivo, itens_json FROM detalhes_devolucao"
+        ).fetchall()
+    return {
+        l[0]: DetalheDevolucao(
+            duplicata_key=l[0], fatura_key=l[1], produtos=l[2], peso_kg=l[3], motivo=l[4], itens_json=l[5]
+        )
+        for l in linhas
+    }
+
+
+def salvar_detalhe_devolucao(detalhe: DetalheDevolucao) -> None:
+    """Grava na hora (uma nota por vez) - se o sync for interrompido no meio da leitura do
+    histórico, o que já foi lido não se perde e não é visitado de novo na próxima vez."""
+    with _conexao() as conexao:
+        conexao.execute(
+            """
+            INSERT INTO detalhes_devolucao (duplicata_key, fatura_key, produtos, peso_kg, motivo, itens_json, lido_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(duplicata_key) DO UPDATE SET
+                fatura_key = excluded.fatura_key, produtos = excluded.produtos, peso_kg = excluded.peso_kg,
+                motivo = excluded.motivo, itens_json = excluded.itens_json, lido_em = excluded.lido_em
+            """,
+            (
+                detalhe.duplicata_key,
+                detalhe.fatura_key,
+                detalhe.produtos,
+                detalhe.peso_kg,
+                detalhe.motivo,
+                detalhe.itens_json,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
         )
 
 
@@ -418,6 +480,43 @@ def remover_verificacao_factoring(duplicata_key: str) -> None:
     próxima rodada de `verificar_boletos_factoring` (que hoje pula quem já está na tabela)."""
     with _conexao() as conexao:
         conexao.execute("DELETE FROM boletos_factoring WHERE duplicata_key = ?", (duplicata_key,))
+
+
+def carregar_beneficiarios_autorizados() -> list[tuple[str, str, str, str]]:
+    """(raiz_fornecedor, raiz_beneficiario, nome do fornecedor, nome do beneficiário)."""
+    with _conexao() as conexao:
+        return conexao.execute(
+            "SELECT raiz_fornecedor, raiz_beneficiario, fornecedor, beneficiario FROM beneficiarios_autorizados "
+            "ORDER BY fornecedor, beneficiario"
+        ).fetchall()
+
+
+def mapa_beneficiarios_autorizados() -> dict[str, set[str]]:
+    mapa: dict[str, set[str]] = {}
+    for raiz_fornecedor, raiz_beneficiario, _, _ in carregar_beneficiarios_autorizados():
+        mapa.setdefault(raiz_fornecedor, set()).add(raiz_beneficiario)
+    return mapa
+
+
+def salvar_beneficiario_autorizado(raiz_fornecedor: str, raiz_beneficiario: str, fornecedor: str, beneficiario: str) -> None:
+    with _conexao() as conexao:
+        conexao.execute(
+            """
+            INSERT INTO beneficiarios_autorizados (raiz_fornecedor, raiz_beneficiario, fornecedor, beneficiario)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(raiz_fornecedor, raiz_beneficiario)
+            DO UPDATE SET fornecedor = excluded.fornecedor, beneficiario = excluded.beneficiario
+            """,
+            (raiz_fornecedor, raiz_beneficiario, fornecedor, beneficiario),
+        )
+
+
+def remover_beneficiario_autorizado(raiz_fornecedor: str, raiz_beneficiario: str) -> None:
+    with _conexao() as conexao:
+        conexao.execute(
+            "DELETE FROM beneficiarios_autorizados WHERE raiz_fornecedor = ? AND raiz_beneficiario = ?",
+            (raiz_fornecedor, raiz_beneficiario),
+        )
 
 
 def marcar_status_manual_factoring(duplicata_key: str, status: str, observacao: str = "") -> None:

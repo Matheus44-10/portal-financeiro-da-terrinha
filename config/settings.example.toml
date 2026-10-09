@@ -4,7 +4,7 @@
 
 [busca]
 # Período (data de vencimento) considerado na busca de notas de devolução e contas a pagar em aberto.
-data_inicial = 2026-01-01
+data_inicial = 2021-01-01
 data_final = 2026-12-31
 
 [intercompany]

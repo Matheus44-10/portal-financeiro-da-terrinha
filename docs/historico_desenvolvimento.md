@@ -18,6 +18,8 @@ O que começou como um app simples de acompanhamento de devolução/abatimento d
   factoring/financeira em vez do fornecedor cadastrado.
 - **Antecipação de Fornecedores** — mostra o desconto financeiro ganho por antecipar pagamento a
   fornecedores, lido de uma planilha externa mantida pelo financeiro.
+- **Histórico de Devoluções** — todas as notas de devolução dos últimos 5 anos (em aberto,
+  vinculadas e quitadas), com produto, kg de matéria-prima e motivo lidos da nota fiscal.
 
 Todas as páginas rodam dentro do mesmo app Streamlit (`app.py`), com sincronização de dados feita
 via automação Playwright do Bluesoft (login manual assistido, sem API oficial).
@@ -279,6 +281,55 @@ levava só o banco). Corrigido:
   correção foi validada (115 linhas, R$ 1.060.005,57 líquido, R$ 31.815,84 de desconto, data
   10/09/2026 vinda do meta e não do mtime).
 
+
+## Out/2026 — 5 anos de histórico, matéria-prima, motivo e factoring mais assertiva
+
+**Período:** busca passou a começar em 2021-01-01 (`[busca] data_inicial`), pedido do usuário pra
+ver devoluções antigas. Primeira atualização com 5 anos: 129 pendentes e 1.226 quitadas.
+
+**Detalhe da nota fiscal (`detalhe_devolucao.py`, `navigation.obter_detalhe_da_fatura`):** para cada
+nota de devolução, abre duplicata de cobrança -> fatura -> nota fiscal (`consultaNotaFiscal/
+visualizar.action?nfKey=`) e lê os itens (`table#itens`, ids `quantidade-item`/`valor-bruto`), o
+peso bruto/líquido (aba Transporte, `#tabDadosDaTransportadora` - está no HTML mesmo escondida, peso
+em formato cru "1.0") e as "Informações adicionais da nota" (`#tableInformacaoAdicional`). Guardado
+na tabela `detalhes_devolucao`, **cache permanente** (não é apagada no sync, gravada nota a nota) -
+a primeira leitura dos 5 anos leva horas, as seguintes só leem o que é novo.
+- **Matéria-prima** = item com prefixo "MP - " na descrição. Kg: "... KG" já é kg; "... KG SC 20.0"
+  é saco de 20 kg (qtde x 20); sem unidade, usa o peso líquido da NF se ela só tiver matéria-prima.
+  Validado em 25 notas reais (ex.: 11 sacos SC 20.0 = 220 kg = peso líquido da NF).
+- **Motivo** = informações adicionais menos os textos automáticos do Bluesoft ("Devolução da
+  mercadoria adquirida pela nota fiscal nº...", "Valor total de IPI = ...", chave de acesso). Mais da
+  metade das notas não tem motivo escrito - fica em branco (confirmado com o usuário que é o esperado).
+- Usuário pediu pra **não** colocar motivo/kg na página Fornecedores (pra não poluir) - só no Histórico.
+
+**Página Histórico de Devoluções:** filtros (status, fornecedor, emissão, "Só matéria-prima"),
+totais, matéria-prima por fornecedor e por produto, resumo por motivo (agrupa tirando a data do
+texto: "...Andre da Qualidade em 22/09/2026" e "...em 03/09/2026" viram uma linha), gráfico mensal,
+tabela completa e Excel.
+
+**Login do Bluesoft:** a tela de login passou a embutir vídeo do YouTube que nunca termina de
+carregar - `page.goto` com o padrão `wait_until="load"` estourava 30s e o sync quebrava antes de
+pedir login. `auth.py` agora usa `domcontentloaded`.
+
+**Factoring - menos "não confirmado"** (diagnóstico feito sobre os anexos já baixados, técnicas
+portadas do projeto "Lançamento de notas"):
+- CNPJ aceito sem pontuação (Sicredi imprime 14 dígitos corridos - ~100 casos), mas só se passar
+  no dígito verificador. Linhas da linha digitável são ignoradas (o último bloco dela passou no DV
+  por coincidência na duplicata 1361654).
+- Rótulo tolerante a OCR (`bene\w{0,3}ci\w{0,2}rio` - o Tesseract lê "Beneliciário").
+- OCR em escala de cinza com `--psm 6`, depois `--psm 3` cinza, depois colorido (a leitura original).
+- Raiz a 1 dígito da cadastrada com DV inválido (erro de OCR) = normal.
+- Sem rótulo: se o único CNPJ do boleto fora do bloco do pagador é do fornecedor = normal.
+- "Sacador/Avalista" e "Beneficiário final" nunca são lidos como beneficiário; CNPJs do grupo que
+  paga (Da Terrinha 15074376, 2JM 45210657) nunca contam como beneficiário - a versão antiga lia o
+  CNPJ da Da Terrinha como beneficiário e marcava factoring falso (5 casos corrigidos com o usuário).
+- Palavras-chave novas: "fundo de investimento" (caso CASE FUNDO DE INVESTIMENTO), "cessão de crédito".
+- **Beneficiários autorizados** (tabela `beneficiarios_autorizados`, formulário na página): empresa
+  do mesmo dono/grupo que pode emitir o boleto do fornecedor sem ser factoring. Primeiro caso,
+  confirmado pelo usuário: Supermercado Rincão de Planaltina -> R S GROSHEVIS LTDA.
+- Botão **"Reprocessar não confirmados"**: relê com a lógica atual usando os anexos já baixados,
+  sem abrir o Bluesoft. Teste em ~1.000 boletos: 246 não confirmados viraram normal, 9 factoring,
+  nenhum "normal" mudou.
 
 ## Notas operacionais importantes
 

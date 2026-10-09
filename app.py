@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import html
 import io
 import re
 import sys
@@ -20,12 +21,18 @@ from st_aggrid.shared import JsCode
 from notas_devolucao import storage
 from notas_devolucao.antecipacao import Antecipacao, carregar_antecipacoes, data_modificacao
 from notas_devolucao.config import BASE_DIR, MODO_NUVEM, carregar_configuracao
+from notas_devolucao.detalhe_devolucao import categoria_motivo, kg_por_produto_materia_prima, limpar_motivo
 from notas_devolucao.email_cobranca import abrir_no_outlook
 from notas_devolucao.login import exigir_login
 from notas_devolucao.models import BoletoFactoring, ContaPagar, NotaDevolucao, Vinculo
 from notas_devolucao.publicacao import publicar_dados
 from notas_devolucao.relatorio_abatimento import NotaQuitada
-from notas_devolucao.sincronizacao import atualizar_dados, verificar_boletos_factoring
+from notas_devolucao.sincronizacao import (
+    aplicar_beneficiarios_autorizados,
+    atualizar_dados,
+    reprocessar_nao_verificados,
+    verificar_boletos_factoring,
+)
 
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo_daterrinha.png"
 
@@ -762,6 +769,55 @@ def pagina_home():
     col_quitado.metric("Quitado no período", f"R$ {resumo['total_quitado']:,.2f}")
 
     st.divider()
+    st.markdown("##### 🕘 Histórico de devoluções")
+    linhas_historico = _linhas_historico_devolucoes()
+    if linhas_historico:
+        df_historico = pd.DataFrame(linhas_historico)
+        df_historico = df_historico[df_historico["Emissão"].notna()]
+        ano_atual = date.today().year
+        hoje = date.today()
+
+        def _ate_hoje_no_ano(ano: int) -> pd.DataFrame:
+            # Mesmo período (1º de janeiro até o dia de hoje) nos dois anos, pra comparação justa.
+            fim = hoje.replace(year=ano) if not (hoje.month == 2 and hoje.day == 29) else date(ano, 2, 28)
+            return df_historico[df_historico["Emissão"].apply(lambda d: date(ano, 1, 1) <= d <= fim)]
+
+        atual, anterior = _ate_hoje_no_ano(ano_atual), _ate_hoje_no_ano(ano_atual - 1)
+
+        def _kg(df_ano: pd.DataFrame) -> float:
+            return df_ano.dropna(subset=["Matéria-prima (kg)"]).drop_duplicates(subset=["CNPJ", "NF"])["Matéria-prima (kg)"].sum()
+
+        def _delta(valor_atual: float, valor_anterior: float) -> str | None:
+            if not valor_anterior:
+                return None
+            return f"{(valor_atual / valor_anterior - 1):+.0%} vs. {ano_atual - 1}"
+
+        valor_atual, valor_anterior = atual["Valor"].sum(), anterior["Valor"].sum()
+        notas_atual = atual[["CNPJ", "NF"]].drop_duplicates().shape[0]
+        notas_anterior = anterior[["CNPJ", "NF"]].drop_duplicates().shape[0]
+        kg_atual, kg_anterior = _kg(atual), _kg(anterior)
+        col_valor_hist, col_notas_hist, col_kg_hist = st.columns(3)
+        # Menos devolução é bom - delta_color="inverse" deixa a queda em verde e o aumento em vermelho.
+        col_valor_hist.metric(
+            f"Valor devolvido em {ano_atual}", _formatar_moeda_br(valor_atual),
+            _delta(valor_atual, valor_anterior), delta_color="inverse",
+        )
+        col_notas_hist.metric(
+            f"Notas de devolução em {ano_atual}", notas_atual,
+            _delta(notas_atual, notas_anterior), delta_color="inverse",
+        )
+        col_kg_hist.metric(
+            f"Matéria-prima devolvida em {ano_atual}", _formatar_kg(kg_atual),
+            _delta(kg_atual, kg_anterior), delta_color="inverse",
+        )
+        st.caption(
+            f"Comparado com o mesmo período de {ano_atual - 1} (1º/jan até {hoje:%d/%m}). "
+            "Detalhes na página **Histórico de Devoluções**."
+        )
+    else:
+        st.caption("Sem histórico carregado ainda.")
+
+    st.divider()
     st.markdown("##### 🏆 Ranking de fornecedores")
     df_ranking = _ranking_fornecedores(resumo["grupos"])
     if not df_ranking.empty:
@@ -1121,6 +1177,387 @@ def pagina_dashboard():
             col_qtd.metric("Qtde. de notas", int(linha_selecionada["Qtde. de notas"]))
 
 
+def _linhas_historico_devolucoes() -> list[dict]:
+    """Junta, numa lista só, toda nota de devolução que o portal conhece: em aberto (incluindo as que
+    o Bluesoft já marcou como abatimento, mas ainda não quitou) e já quitadas - cada uma com o
+    detalhe lido da fatura/nota fiscal (produto, peso, motivo), quando já houver."""
+    detalhes = storage.carregar_detalhes_devolucao()
+    LOJAS_PERMITIDAS = {1, 14}
+    linhas: list[dict] = []
+
+    def _detalhe(chave: str, produtos_fallback: str | None = None) -> dict:
+        d = detalhes.get(chave)
+        return {
+            "Produto(s)": (d.produtos if d and d.produtos else produtos_fallback) or "",
+            "Matéria-prima (kg)": d.peso_kg if d else None,
+            "Motivo": limpar_motivo(d.motivo if d else None),
+            "_mp_por_produto": kg_por_produto_materia_prima(d) if d else {},
+        }
+
+    for n in storage.carregar_notas_devolucao():
+        if n.loja not in LOJAS_PERMITIDAS:
+            continue
+        linhas.append(
+            {
+                "Status": "Vinculada p/ abatimento" if n.duplicata_pagamento_vinculada else "Em aberto",
+                "Fornecedor": n.fornecedor.strip(),
+                "CNPJ": n.fornecedor_cnpj,
+                "NF": n.numero_documento,
+                "Tipo": n.tipo,
+                "Loja": n.loja_nome or f"Loja {n.loja}",
+                "Emissão": n.data_emissao,
+                "Vencimento": n.data_vencimento,
+                "Quitação": None,
+                "Valor": n.valor_liquido,
+                "Duplicata": n.duplicata_key,
+                **_detalhe(n.duplicata_key, n.produtos),
+            }
+        )
+    for q in storage.carregar_notas_devolucao_quitadas():
+        if q.loja not in LOJAS_PERMITIDAS:
+            continue
+        linhas.append(
+            {
+                "Status": "Quitada",
+                "Fornecedor": q.fornecedor.strip(),
+                "CNPJ": q.fornecedor_cnpj,
+                "NF": q.numero_documento,
+                "Tipo": q.tipo,
+                "Loja": q.loja_nome or f"Loja {q.loja}",
+                "Emissão": q.data_emissao or q.data_criacao,
+                "Vencimento": None,
+                "Quitação": q.data_quitacao,
+                "Valor": q.valor_liquido,
+                "Duplicata": q.duplicata_key,
+                **_detalhe(q.duplicata_key),
+            }
+        )
+    return linhas
+
+
+def _comparativo_anual(df: pd.DataFrame) -> pd.DataFrame:
+    """Uma linha por ano de emissão: qtde. de notas (por NF), valor e kg de matéria-prima, com a
+    variação do valor contra o ano anterior. `df` = linhas de `_linhas_historico_devolucoes`."""
+    if df.empty:
+        return pd.DataFrame()
+    # Anos antes do início da busca só aparecem por causa de notas antigas quitadas depois - ficariam
+    # incompletos e com variação enganosa (ex.: +3000%), então ficam de fora do comparativo.
+    df = df[df["Emissão"].apply(lambda d: d.year >= config.data_inicial.year)]
+    if df.empty:
+        return pd.DataFrame()
+    base = df.assign(Ano=df["Emissão"].apply(lambda d: d.year), _nf=df["CNPJ"] + "|" + df["NF"])
+    kg_por_ano = (
+        base.dropna(subset=["Matéria-prima (kg)"]).drop_duplicates(subset=["CNPJ", "NF"])
+        .groupby("Ano")["Matéria-prima (kg)"].sum()
+    )
+    anual = base.groupby("Ano").agg(**{"Qtde. de notas": ("_nf", "nunique"), "Valor": ("Valor", "sum")})
+    # Ano sem nenhum item "MP - " fica em branco, não "0 kg": o prefixo só passou a ser usado no
+    # cadastro de produtos do Bluesoft por volta de 2024 - antes disso o dado simplesmente não existe.
+    anual["Matéria-prima (kg)"] = kg_por_ano.reindex(anual.index).where(lambda v: v > 0)
+    variacao = anual["Valor"].pct_change()
+    anual = anual.reset_index().sort_values("Ano", ascending=False)
+    anual["Variação do valor"] = [
+        "—" if pd.isna(v) else f"{v:+.0%}".replace(".", ",") for v in variacao.reindex(anual["Ano"]).tolist()
+    ]
+    anual["Valor"] = anual["Valor"].apply(_formatar_moeda_br)
+    ano_atual = date.today().year
+    anual["Ano"] = anual["Ano"].apply(lambda a: f"{a} (até hoje)" if a == ano_atual else str(a))
+    anual["Matéria-prima (kg)"] = anual["Matéria-prima (kg)"].apply(lambda v: "" if pd.isna(v) else _formatar_kg(v))
+    return anual[["Ano", "Qtde. de notas", "Valor", "Variação do valor", "Matéria-prima (kg)"]]
+
+
+def _formatar_kg(valor: float | None) -> str:
+    """Kg no formato brasileiro: milhar com ponto, decimal com vírgula. A partir de 100 kg arredonda
+    pro inteiro ("28.748 kg"); abaixo disso mostra até 2 casas só quando houver ("4,5 kg", "20 kg").
+    Vazio quando não há valor."""
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = f"{valor:,.0f}" if abs(valor) >= 100 else f"{valor:,.2f}"
+    texto = texto.replace(",", "_").replace(".", ",").replace("_", ".")
+    texto = texto[:-3] if texto.endswith(",00") else texto.rstrip("0") if "," in texto else texto
+    return f"{texto} kg"
+
+
+def pagina_historico():
+    st.subheader("Histórico de devoluções")
+    st.caption(
+        "Todas as notas de devolução de fornecedor (Matriz e Filial SP) dos últimos anos - em aberto, "
+        "vinculadas para abatimento e já quitadas, numa visão só."
+    )
+    _barra_lateral_atualizar_dados()
+
+    st.markdown(
+        """
+        <style>
+        @keyframes pulsoMotivo {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(238, 105, 49, 0.55); }
+            50% { box-shadow: 0 0 0 8px rgba(238, 105, 49, 0); }
+        }
+        @keyframes entradaFiltro {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .filtro-motivo-ativo {
+            display: inline-block;
+            margin: 4px 0 10px;
+            padding: 6px 14px;
+            border-radius: 999px;
+            background: #EE6931;
+            color: #FFFFFF;
+            font-weight: 600;
+            font-size: 0.9rem;
+            animation: entradaFiltro 0.35s ease-out, pulsoMotivo 1.6s ease-in-out 3;
+        }
+        .st-key-hist_mp_filtrado, .st-key-hist_forn_motivo {
+            border: 2px solid #EE6931;
+            border-radius: 12px;
+            padding: 10px 12px;
+            animation: entradaFiltro 0.35s ease-out, pulsoMotivo 1.6s ease-in-out 2;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    linhas = _linhas_historico_devolucoes()
+    if not linhas:
+        st.info("Nenhum dado carregado ainda. Clique em **Atualizar dados do Bluesoft** na barra lateral.")
+        return
+    df = pd.DataFrame(linhas)
+
+    datas_emissao = [d for d in df["Emissão"] if d is not None]
+    menor_data = min(datas_emissao) if datas_emissao else config.data_inicial
+    maior_data = max(datas_emissao) if datas_emissao else date.today()
+
+    col_status, col_forn, col_de, col_ate = st.columns([2, 3, 1, 1])
+    status_opcoes = ["Em aberto", "Vinculada p/ abatimento", "Quitada"]
+    status_escolhidos = col_status.multiselect("Status", status_opcoes, default=status_opcoes, key="hist_status")
+    fornecedores_escolhidos = col_forn.multiselect(
+        "Fornecedor", sorted(df["Fornecedor"].unique()), placeholder="Todos", key="hist_fornecedor"
+    )
+    data_de = col_de.date_input(
+        "Emissão de", value=menor_data, min_value=menor_data, max_value=maior_data,
+        format="DD/MM/YYYY", key="hist_data_de",
+    )
+    data_ate = col_ate.date_input(
+        "Emissão até", value=maior_data, min_value=menor_data, max_value=maior_data,
+        format="DD/MM/YYYY", key="hist_data_ate",
+    )
+
+    so_materia_prima = st.toggle(
+        "Só matéria-prima", key="hist_so_mp",
+        help="Mostra só as notas com itens de matéria-prima (\"MP - \" na descrição da nota fiscal).",
+    )
+
+    df = df[df["Status"].isin(status_escolhidos)]
+    if so_materia_prima:
+        df = df[df["Matéria-prima (kg)"].notna()]
+    if fornecedores_escolhidos:
+        df = df[df["Fornecedor"].isin(fornecedores_escolhidos)]
+    df = df[df["Emissão"].apply(lambda d: d is not None and data_de <= d <= data_ate)]
+
+    if df.empty:
+        st.info("Nenhuma nota de devolução com esses filtros.")
+        return
+
+    # Mesma consolidação do resto do portal: o Bluesoft desmembra a mesma NF em várias duplicatas
+    # (parcelas) conforme abate - a contagem é por NF (fornecedor + nº), não por duplicata.
+    qtd_notas = df[["CNPJ", "NF"]].drop_duplicates().shape[0]
+    total_aberto = df.loc[df["Status"] != "Quitada", "Valor"].sum()
+    total_quitado = df.loc[df["Status"] == "Quitada", "Valor"].sum()
+    # Kg de matéria-prima é da NF inteira (não da parcela) - soma uma vez por NF.
+    df_kg = df.dropna(subset=["Matéria-prima (kg)"]).drop_duplicates(subset=["CNPJ", "NF"])
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Qtde. de notas", qtd_notas)
+    col2.metric("Valor em aberto", _formatar_moeda_br(total_aberto))
+    col3.metric("Valor quitado", _formatar_moeda_br(total_quitado))
+    col4.metric("Matéria-prima devolvida", _formatar_kg(df_kg["Matéria-prima (kg)"].sum()) if not df_kg.empty else "—")
+
+    sem_detalhe = df[df["Produto(s)"] == ""][["CNPJ", "NF"]].drop_duplicates().shape[0]
+    if sem_detalhe:
+        st.caption(
+            f"ℹ️ {sem_detalhe} nota(s) ainda sem produto/kg/motivo lidos do Bluesoft - são preenchidas "
+            "aos poucos a cada **Atualizar dados do Bluesoft**."
+        )
+
+    # Resumo por motivo vem antes da matéria-prima: clicar numa linha dele filtra as tabelas "Por
+    # fornecedor"/"Por produto" logo abaixo. A seleção é lida do session_state antes de desenhar a
+    # tabela (o resumo é calculado de forma determinística, então a linha N continua sendo o mesmo motivo).
+    # Duas visões: por categoria (motivos parecidos agrupados - "fora do padrão de qualidade",
+    # "produto mofado" etc. viram "Qualidade / defeito") ou pelo motivo detalhado, como escrito na nota.
+    df_motivo = df.assign(
+        Motivo=df["Motivo"].replace("", "Não informado"),
+        Categoria=df["Motivo"].apply(categoria_motivo),
+        _nf=df["CNPJ"] + "|" + df["NF"],
+    )
+    st.markdown("**Devoluções por motivo**")
+    visao_motivo = st.radio(
+        "Ver por", ["Categoria", "Motivo detalhado"], horizontal=True, key="hist_visao_motivo",
+        label_visibility="collapsed",
+    )
+    coluna_motivo = "Categoria" if visao_motivo == "Categoria" else "Motivo"
+    chave_selecao = "hist_categoria_sel" if coluna_motivo == "Categoria" else "hist_motivo_sel"
+    resumo_motivo = (
+        df_motivo.groupby(coluna_motivo)
+        .agg(**{"Qtde. de notas": ("_nf", "nunique"), "Valor": ("Valor", "sum")})
+        .reset_index()
+        .sort_values(["Valor", coluna_motivo], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+    linhas_motivo = st.session_state.get(chave_selecao, {}).get("selection", {}).get("rows", [])
+    motivo_escolhido = (
+        resumo_motivo.iloc[linhas_motivo[0]][coluna_motivo]
+        if linhas_motivo and linhas_motivo[0] < len(resumo_motivo)
+        else None
+    )
+
+    st.caption(
+        "Motivo escrito nas informações adicionais da nota fiscal - nem toda nota tem. "
+        "**Clique numa linha** pra ver os fornecedores daquele motivo; clique de novo pra limpar."
+    )
+    st.dataframe(
+        resumo_motivo.assign(Valor=resumo_motivo["Valor"].apply(_formatar_moeda_br)),
+        hide_index=True,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key=chave_selecao,
+    )
+
+    if motivo_escolhido:
+        st.markdown(
+            f'<span class="filtro-motivo-ativo">🔎 Filtrando por {coluna_motivo.lower()}: '
+            f"{html.escape(motivo_escolhido)}</span>",
+            unsafe_allow_html=True,
+        )
+        df_do_motivo = df_motivo[df_motivo[coluna_motivo] == motivo_escolhido]
+        fornecedores_motivo = (
+            df_do_motivo.groupby("Fornecedor")
+            .agg(**{"Qtde. de notas": ("_nf", "nunique"), "Valor": ("Valor", "sum")})
+            .reset_index()
+            .sort_values("Valor", ascending=False)
+        )
+        with st.container(key="hist_forn_motivo"):
+            st.markdown("**Fornecedores com esse motivo**")
+            st.dataframe(
+                fornecedores_motivo.assign(Valor=fornecedores_motivo["Valor"].apply(_formatar_moeda_br)),
+                hide_index=True,
+                width="stretch",
+            )
+        chaves_do_motivo = set(df_do_motivo["_nf"])
+        df_kg = df_kg[(df_kg["CNPJ"] + "|" + df_kg["NF"]).isin(chaves_do_motivo)]
+
+    st.markdown("**Matéria-prima devolvida**")
+    st.caption("Só itens de matéria-prima (\"MP - \" na descrição da nota fiscal), em kg.")
+    if df_kg.empty:
+        st.caption(
+            "Nenhuma matéria-prima devolvida com esse motivo."
+            if motivo_escolhido
+            else "Nenhuma matéria-prima identificada nas notas filtradas."
+        )
+    else:
+        resumo_kg = (
+            df_kg.groupby("Fornecedor", as_index=False)
+            .agg(**{"Matéria-prima (kg)": ("Matéria-prima (kg)", "sum"), "Qtde. de notas": ("NF", "nunique")})
+            .sort_values("Matéria-prima (kg)", ascending=False)
+        )
+        linhas_produto: dict[str, dict] = {}
+        for _, linha in df_kg.iterrows():
+            for produto, kg in linha["_mp_por_produto"].items():
+                item = linhas_produto.setdefault(produto, {"Produto": produto, "Matéria-prima (kg)": 0.0, "notas": set()})
+                item["Matéria-prima (kg)"] += kg
+                item["notas"].add((linha["CNPJ"], linha["NF"]))
+        resumo_produto = pd.DataFrame(
+            [
+                {"Produto": i["Produto"], "Matéria-prima (kg)": i["Matéria-prima (kg)"], "Qtde. de notas": len(i["notas"])}
+                for i in linhas_produto.values()
+            ]
+        )
+        # Com motivo escolhido, o container ganha uma chave diferente - o CSS anima a borda dele
+        # (`.st-key-hist_mp_filtrado`), chamando atenção pra parte que mudou.
+        with st.container(key="hist_mp_filtrado" if motivo_escolhido else "hist_mp"):
+            col_forn_kg, col_prod_kg = st.columns(2)
+            with col_forn_kg:
+                st.markdown("**Por fornecedor**")
+                st.dataframe(
+                    resumo_kg.assign(**{"Matéria-prima (kg)": resumo_kg["Matéria-prima (kg)"].apply(_formatar_kg)}),
+                    hide_index=True,
+                    width="stretch",
+                    # Nome com largura limitada pra coluna de kg caber sem rolar a tabela pro lado.
+                    column_config={"Fornecedor": st.column_config.TextColumn(width="medium")},
+                )
+            with col_prod_kg:
+                st.markdown("**Por produto**")
+                if resumo_produto.empty:
+                    st.caption("Nenhum item de matéria-prima com kg identificado.")
+                else:
+                    resumo_produto = resumo_produto.sort_values("Matéria-prima (kg)", ascending=False)
+                    st.dataframe(
+                        resumo_produto.assign(
+                            **{"Matéria-prima (kg)": resumo_produto["Matéria-prima (kg)"].apply(_formatar_kg)}
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                        column_config={"Produto": st.column_config.TextColumn(width="medium")},
+                    )
+
+    st.markdown("**Comparativo ano a ano**")
+    st.caption("Pelo ano de emissão da nota, respeitando os filtros acima. A variação é contra o ano anterior.")
+    st.dataframe(
+        _comparativo_anual(df),
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.markdown("**Devoluções por mês de emissão**")
+    df_mes = df.assign(Mês=df["Emissão"].apply(lambda d: date(d.year, d.month, 1)))
+    grafico = (
+        alt.Chart(df_mes.groupby(["Mês", "Status"], as_index=False)["Valor"].sum())
+        .mark_bar()
+        .encode(
+            x=alt.X("yearmonth(Mês):T", title=None, axis=alt.Axis(format="%m/%Y", labelAngle=0)),
+            y=alt.Y("Valor:Q", title=None),
+            color=alt.Color(
+                "Status:N",
+                scale=alt.Scale(domain=status_opcoes, range=["#EE6931", "#F5B38F", "#8A8A8A"]),
+                legend=alt.Legend(orient="top", title=None, labelLimit=250, columnPadding=24),
+            ),
+            tooltip=[
+                alt.Tooltip("yearmonth(Mês):T", title="Mês", format="%m/%Y"),
+                "Status:N",
+                alt.Tooltip("Valor:Q", format=",.2f"),
+            ],
+        )
+    )
+    st.altair_chart(grafico, width="stretch")
+
+    df_tabela = df.sort_values("Emissão", ascending=False).drop(columns=["CNPJ", "_mp_por_produto"])
+    st.dataframe(
+        # Na tela o kg vai formatado ("28.748 kg"); o Excel abaixo continua com o número puro.
+        df_tabela.assign(**{"Matéria-prima (kg)": df_tabela["Matéria-prima (kg)"].apply(_formatar_kg)}),
+        hide_index=True,
+        width="stretch",
+        height=520,
+        column_config={
+            "Emissão": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Vencimento": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Quitação": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Valor": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+    )
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_tabela.to_excel(writer, sheet_name="Histórico de devoluções", index=False)
+    st.download_button(
+        "Baixar em Excel",
+        data=buffer.getvalue(),
+        file_name=f"historico_devolucoes_{date.today():%Y-%m-%d}.xlsx",
+        icon=":material/download:",
+    )
+
+
 def pagina_factoring():
     st.subheader("Pagamentos via Boleto / Factoring")
     st.caption(
@@ -1158,6 +1595,25 @@ def pagina_factoring():
         barra.empty()
         st.session_state["avisos_factoring"] = avisos_factoring
         st.session_state["mensagem_factoring"] = f"{len(novos)} duplicatas novas verificadas nesta rodada."
+        st.rerun()
+
+    if not _modo_leitura() and st.button(
+        "Reprocessar não confirmados",
+        icon=":material/refresh:",
+        help="Relê os boletos que ficaram como \"não confirmado\" com a leitura mais recente, usando os "
+        "arquivos já baixados (não abre o Bluesoft).",
+    ):
+        barra = st.progress(0.0, text="Relendo boletos não confirmados...")
+
+        def _progresso_reprocessar(indice: int, total: int) -> None:
+            barra.progress(indice / total if total else 1.0, text=f"Relendo boletos: {indice}/{total}")
+
+        reprocessados, decididos = reprocessar_nao_verificados(progress_callback=_progresso_reprocessar)
+        barra.empty()
+        st.session_state["mensagem_factoring"] = (
+            f"{reprocessados} boletos não confirmados relidos - {decididos} agora têm resposta "
+            "(normal ou factoring)."
+        )
         st.rerun()
 
     for aviso in st.session_state.get("avisos_factoring", []):
@@ -1420,6 +1876,47 @@ def pagina_factoring():
     if _modo_leitura():
         return
 
+    st.markdown("**Beneficiários autorizados (mesmo grupo do fornecedor)**")
+    st.caption(
+        "Empresas que podem aparecer como beneficiário no boleto de um fornecedor sem ser factoring "
+        "(outra empresa do mesmo dono, depósito, filial com outro CNPJ). Boletos assim passam a contar "
+        "como **Normal** - inclusive os já marcados como Factoring."
+    )
+    fornecedores_boletos = {
+        f"{b.favorecido.strip()} — {b.favorecido_cnpj}": (b.favorecido.strip(), b.favorecido_cnpj)
+        for b in sorted(boletos_todos, key=lambda b: b.favorecido.strip())
+    }
+    with st.form(key="form_beneficiario_autorizado"):
+        col_forn_aut, col_cnpj_aut, col_nome_aut = st.columns([3, 2, 2])
+        fornecedor_aut = col_forn_aut.selectbox("Fornecedor", options=list(fornecedores_boletos.keys()))
+        cnpj_aut = col_cnpj_aut.text_input("CNPJ do beneficiário", placeholder="50.033.764/0001-51")
+        nome_aut = col_nome_aut.text_input("Nome do beneficiário", placeholder="R S GROSHEVIS LTDA")
+        if st.form_submit_button("Autorizar", icon=":material/verified:", type="primary"):
+            digitos_aut = re.sub(r"\D", "", cnpj_aut)
+            if len(digitos_aut) < 8:
+                st.warning("Informe o CNPJ do beneficiário (pelo menos os 8 primeiros dígitos).")
+            else:
+                nome_forn_aut, cnpj_forn_aut = fornecedores_boletos[fornecedor_aut]
+                storage.salvar_beneficiario_autorizado(
+                    re.sub(r"\D", "", cnpj_forn_aut)[:8], digitos_aut[:8], nome_forn_aut, nome_aut.strip()
+                )
+                alterados_aut = aplicar_beneficiarios_autorizados()
+                st.session_state["mensagem_factoring"] = (
+                    f"Beneficiário autorizado. {alterados_aut} boleto(s) que estavam como Factoring passaram a Normal."
+                )
+                st.rerun()
+
+    autorizados_lista = storage.carregar_beneficiarios_autorizados()
+    for raiz_forn_aut, raiz_ben_aut, nome_forn_lista, nome_ben_lista in autorizados_lista:
+        col_texto_aut, col_remover_aut = st.columns([5, 1])
+        col_texto_aut.caption(
+            f"✅ **{nome_forn_lista}** pode receber via **{nome_ben_lista or 'CNPJ ' + raiz_ben_aut}** "
+            f"(raiz {raiz_ben_aut})"
+        )
+        if col_remover_aut.button("Remover", key=f"remover_aut_{raiz_forn_aut}_{raiz_ben_aut}"):
+            storage.remover_beneficiario_autorizado(raiz_forn_aut, raiz_ben_aut)
+            st.rerun()
+
     st.markdown("**Forçar reverificação de uma duplicata específica**")
     st.caption(
         "Se uma duplicata específica precisa ser checada de novo (ex.: o boleto foi trocado no "
@@ -1678,6 +2175,12 @@ pg = st.navigation(
             pagina_dashboard,
             title="Dashboard",
             icon=":material/bar_chart:",
+            visibility=_visibilidade_paginas_privadas,
+        ),
+        st.Page(
+            pagina_historico,
+            title="Histórico de Devoluções",
+            icon=":material/history:",
             visibility=_visibilidade_paginas_privadas,
         ),
         st.Page(
